@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+  Launcher icon: a speaker with two sound arcs, drawn inside the 72dp safe
+  zone of the 108dp adaptive-icon canvas.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#4CC2FF"
+        android:pathData="M38,44 L50,44 L62,32 L62,76 L50,64 L38,64 Z" />
+    <path
+        android:fillColor="#4CC2FF"
+        android:pathData="M68,42 A20,20 0 0 1 68,66 L68,60 A14,14 0 0 0 68,48 Z" />
+    <path
+        android:fillColor="#4CC2FF"
+        android:pathData="M74,34 A30,30 0 0 1 74,74 L74,68 A24,24 0 0 0 74,40 Z" />
+</vector>

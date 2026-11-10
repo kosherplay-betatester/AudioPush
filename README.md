@@ -21,6 +21,24 @@ moving; if it moves on the sender but not the receiver, it is a firewall.
 
 ---
 
+## Android
+
+There is an Android build in [`android/`](android/) that speaks the same
+protocol, so a phone and a PC find each other with nothing to configure:
+
+- **Phone as a speaker** for the PC — works fully.
+- **Phone as a source**, playing through the PC — works, with one platform
+  caveat: Android lets each app refuse to have its audio captured, and several
+  streaming apps do. Those arrive as silence.
+- **USB cable mode** via USB tethering, which removes WiFi from the equation
+  entirely and is the lowest-latency path available.
+
+Build it with `cd android && .\gradlew.bat assembleRelease`. See
+[android/README.md](android/README.md) for the details, the capture
+limitation and the USB setup.
+
+---
+
 ## Building
 
 Requires [Rust](https://rustup.rs) (stable, MSVC toolchain). Then:

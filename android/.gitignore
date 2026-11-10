@@ -2,3 +2,11 @@ build/
 .gradle/
 local.properties
 *.apk
+
+# Release signing material. This machine's key and its passwords: never
+# committed. Losing it means future builds cannot update an installed copy,
+# so keep a backup somewhere safe.
+signing/
+*.jks
+*.keystore
+keystore.properties

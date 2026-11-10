@@ -20,6 +20,7 @@ use crate::engine::Session;
 use crate::net::discovery::{self, PeerList};
 use crate::net::scan::{self, ScanProgress};
 use crate::net::{LocalAddress, hostname, local_addresses};
+use crate::settings::Settings;
 use crate::state::{Peer, Shared, now_ms};
 use crate::tray::Tray;
 
@@ -69,6 +70,9 @@ pub struct AudioPushApp {
     playback_device: Option<String>,
     local_ips: Vec<LocalAddress>,
 
+    // Remembered between runs
+    settings: Settings,
+
     // Shell
     tray: Option<Tray>,
     hidden: bool,
@@ -79,23 +83,34 @@ pub struct AudioPushApp {
 impl AudioPushApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> AudioPushApp {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
+
+        // Pick up what was chosen last time, so a repeat run is one click.
+        let settings = Settings::load();
+        let target = settings.last_target;
+        let target_label = match (&settings.last_target_name, target) {
+            (name, Some(addr)) if !name.is_empty() => format!("{name} ({})", addr.ip()),
+            (_, Some(addr)) => addr.to_string(),
+            _ => String::new(),
+        };
+
         AudioPushApp {
             screen: Screen::Chooser,
-            preset: Latency::Balanced,
+            preset: settings.preset.unwrap_or(Latency::Balanced),
             shared: Arc::new(Shared::new()),
             session: None,
             output_devices: list_devices(Direction::Render),
-            capture_device: None,
+            capture_device: settings.capture_device.clone(),
             peers: discovery::new_peer_list(),
             discovery: None,
             discovery_error: None,
             scan_progress: Arc::new(ScanProgress::default()),
-            manual_ip: String::new(),
+            manual_ip: target.map(|a| a.ip().to_string()).unwrap_or_default(),
             manual_error: None,
-            target: None,
-            target_label: String::new(),
-            playback_device: None,
+            target,
+            target_label,
+            playback_device: settings.playback_device.clone(),
             local_ips: local_addresses(),
+            settings,
             tray: None,
             hidden: false,
             device_refresh: Instant::now(),
@@ -155,6 +170,58 @@ impl AudioPushApp {
         self.device_refresh = Instant::now();
     }
 
+    /// Writes the preset and device choices out when they change.
+    ///
+    /// Called once a frame; the comparison is trivial and the file is only
+    /// touched on an actual change, so this costs nothing while idle.
+    fn sync_settings(&mut self) {
+        let mut dirty = false;
+        if self.settings.preset != Some(self.preset) {
+            self.settings.preset = Some(self.preset);
+            dirty = true;
+        }
+        if self.settings.capture_device != self.capture_device {
+            self.settings.capture_device = self.capture_device.clone();
+            dirty = true;
+        }
+        if self.settings.playback_device != self.playback_device {
+            self.settings.playback_device = self.playback_device.clone();
+            dirty = true;
+        }
+        if dirty {
+            self.settings.save();
+        }
+    }
+
+    /// Records the chosen receiver so the next run starts with it selected.
+    fn remember_target(&mut self, addr: SocketAddr, name: &str) {
+        self.target = Some(addr);
+        self.target_label = if name.is_empty() {
+            addr.to_string()
+        } else {
+            format!("{name} ({})", addr.ip())
+        };
+        self.manual_error = None;
+        self.settings.last_target = Some(addr);
+        self.settings.last_target_name = name.to_string();
+        self.settings.save();
+    }
+
+    /// Empties the discovered list and forgets the saved receiver.
+    ///
+    /// Receivers that are still running reappear within a second, which is
+    /// the point: this clears what is stale, not what is live.
+    fn clear_list(&mut self) {
+        if let Ok(mut peers) = self.peers.lock() {
+            peers.clear();
+        }
+        self.target = None;
+        self.target_label.clear();
+        self.manual_ip.clear();
+        self.manual_error = None;
+        self.settings.forget_target();
+    }
+
     fn live_peers(&self) -> Vec<Peer> {
         let Ok(list) = self.peers.lock() else {
             return Vec::new();
@@ -194,6 +261,7 @@ impl eframe::App for AudioPushApp {
                 Screen::Receiver => self.receiver_ui(ui),
             });
         });
+        self.sync_settings();
     }
 
     fn on_exit(&mut self) {
@@ -328,7 +396,7 @@ impl AudioPushApp {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_min_height(74.0);
             ui.set_width(ui.available_width());
-            if peers.is_empty() {
+            if peers.is_empty() && self.settings.last_target.is_none() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(8.0);
                     ui.label(
@@ -348,9 +416,31 @@ impl AudioPushApp {
                     let selected = self.target == Some(peer.addr);
                     let label = format!("{}  —  {}", peer.hostname, peer.addr.ip());
                     if ui.selectable_label(selected, label).clicked() && !streaming {
-                        self.target = Some(peer.addr);
-                        self.target_label = format!("{} ({})", peer.hostname, peer.addr.ip());
-                        self.manual_error = None;
+                        let (addr, name) = (peer.addr, peer.hostname.clone());
+                        self.remember_target(addr, &name);
+                    }
+                }
+            }
+
+            // The receiver used last time, when it is not announcing right
+            // now. Offered anyway: it is usually just not started yet, and
+            // streaming to it will work the moment it is.
+            if let Some(saved) = self.settings.last_target {
+                if !peers.iter().any(|p| p.addr == saved) {
+                    let selected = self.target == Some(saved);
+                    let name = if self.settings.last_target_name.is_empty() {
+                        saved.ip().to_string()
+                    } else {
+                        self.settings.last_target_name.clone()
+                    };
+                    let label = format!("{}  —  {}   (last used)", name, saved.ip());
+                    if ui
+                        .selectable_label(selected, egui::RichText::new(label).weak())
+                        .on_hover_text("Saved from a previous run; not announcing right now")
+                        .clicked()
+                        && !streaming
+                    {
+                        self.remember_target(saved, &name);
                     }
                 }
             }
@@ -375,12 +465,23 @@ impl AudioPushApp {
                     );
                 }
             }
+            if ui
+                .add_enabled(!streaming, egui::Button::new("Clear list"))
+                .on_hover_text(
+                    "Empties the list and forgets the saved address. \
+                     Receivers that are running reappear within a second.",
+                )
+                .clicked()
+            {
+                self.clear_list();
+            }
+
             if scanning {
                 let sent = self.scan_progress.sent.load(Ordering::Relaxed);
                 let total = self.scan_progress.total.load(Ordering::Relaxed).max(1);
                 ui.add(
                     egui::ProgressBar::new(sent as f32 / total as f32)
-                        .desired_width(140.0)
+                        .desired_width(120.0)
                         .text(format!("{sent}/{total}")),
                 );
             }
@@ -397,11 +498,7 @@ impl AudioPushApp {
             );
             if ui.add_enabled(!streaming, egui::Button::new("Use")).clicked() {
                 match parse_target(&self.manual_ip) {
-                    Ok(addr) => {
-                        self.target = Some(addr);
-                        self.target_label = addr.to_string();
-                        self.manual_error = None;
-                    }
+                    Ok(addr) => self.remember_target(addr, ""),
                     Err(err) => self.manual_error = Some(err),
                 }
             }

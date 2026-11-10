@@ -29,6 +29,11 @@ object StreamStats {
         @Synchronized get
         @Synchronized set
 
+    /** Where the platform says playback is actually going right now. */
+    var outputText: String? = null
+        @Synchronized get
+        @Synchronized set
+
     fun setLevel(value: Float) = levelBits.set(java.lang.Float.floatToRawIntBits(value))
 
     fun level(): Float = java.lang.Float.intBitsToFloat(levelBits.get())
@@ -49,5 +54,6 @@ object StreamStats {
         setLevel(0f)
         peerText = null
         errorText = null
+        outputText = null
     }
 }

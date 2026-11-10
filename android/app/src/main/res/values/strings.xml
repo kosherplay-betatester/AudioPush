@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AudioPush</string>
+    <string name="section_mode">Mode</string>
     <string name="tagline">Low-latency audio between this phone and your PC</string>
     <string name="mode_receive">Receive — play PC audio on this phone</string>
     <string name="mode_send">Send — play this phone\'s audio on the PC</string>
@@ -8,6 +9,7 @@
     <string name="usually_found">The PC usually finds this phone by name on its own. USB tethering shows up here as a wired address and is the lowest-latency path.</string>
     <string name="pcs_found">PCs running AudioPush in receive mode</string>
     <string name="scan">Scan</string>
+    <string name="clear">Clear</string>
     <string name="manual_hint">192.168.1.20</string>
     <string name="capture_caveat">Android lets each app refuse to have its audio captured, and many streaming apps do. Anything that refuses arrives as silence — that is a platform rule, not a bug here.</string>
     <string name="latency">Latency</string>

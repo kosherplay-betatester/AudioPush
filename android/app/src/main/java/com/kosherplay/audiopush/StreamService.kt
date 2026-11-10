@@ -55,7 +55,7 @@ class StreamService : Service() {
         )
 
         locks = WifiLocks(this).also { it.acquire() }
-        receiver = ReceiverEngine(preset).also { it.start() }
+        receiver = ReceiverEngine(this, preset).also { it.start() }
         // Announce so the PC finds this phone by name instead of by IP.
         announcer = Announcer(Config.AUDIO_PORT).also { it.start() }
     }

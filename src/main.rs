@@ -12,6 +12,7 @@ mod engine;
 mod net;
 mod priority;
 mod ring;
+mod settings;
 mod state;
 mod tray;
 

@@ -133,3 +133,23 @@ audio capture. Nothing to fix; try a different app to confirm.
 **Nothing after the screen turns off.** Check the AudioPush notification is
 present. Some vendors (Xiaomi, Huawei, Samsung) kill foreground services
 anyway — set AudioPush to *No restrictions* in the battery settings.
+
+---
+
+## "The level meter moves but there is no sound"
+
+Check the **Output:** line on the status card. It shows where Android is
+actually sending playback, which separates three faults that look identical:
+
+- **`Phone speaker` / `Bluetooth` with a sensible media volume** — routing is
+  fine, so the problem is elsewhere.
+- **`type 25`, or anything virtual** — media is being routed to
+  `REMOTE_SUBMIX`, the sink used by screen recording, casting and playback
+  capture. Audio written there is healthy and completely inaudible. The app
+  now pins playback to a real output to defend against this, but if you see
+  it, something on the phone is holding a capture session: stop any screen
+  recorder, Cast/Smart View session, or audio-sharing feature.
+- **A real device but `media volume 0%`** — turn the volume up.
+
+This is also logged, so `adb logcat -s AudioPush` shows the routed device and
+every available output at the moment the track opened.

@@ -21,6 +21,8 @@ import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import java.net.InetAddress
 
 /**
@@ -37,7 +39,7 @@ class MainActivity : AppCompatActivity() {
     private var preset = Latency.BALANCED
     private val discovery = DiscoveryListener()
     private var selectedPeer: Peer? = null
-    private var manualHost: String? = null
+    private lateinit var settings: Settings
 
     private val ui = Handler(Looper.getMainLooper())
     private lateinit var tick: Runnable
@@ -51,10 +53,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var peerList: ListView
     private lateinit var manualIp: EditText
     private lateinit var scanButton: Button
+    private lateinit var clearButton: Button
     private lateinit var startButton: Button
     private lateinit var statusText: TextView
+    private lateinit var outputText: TextView
     private lateinit var statsText: TextView
     private lateinit var errorText: TextView
+    private lateinit var estimateText: TextView
+    private lateinit var statusDot: View
     private lateinit var meter: ProgressBar
 
     private val peerAdapter by lazy {
@@ -74,6 +80,11 @@ class MainActivity : AppCompatActivity() {
                 StreamStats.errorText = "Choose a PC to send to first."
                 return@registerForActivityResult
             }
+            // Remember it, so the next run is one tap.
+            settings.lastHost = host.first
+            settings.lastPort = host.second
+            settings.lastName = selectedPeer?.hostname
+
             val intent = Intent(this, StreamService::class.java)
                 .setAction(StreamService.ACTION_START_SENDER)
                 .putExtra(StreamService.EXTRA_PRESET, preset.ordinal)
@@ -90,6 +101,9 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        settings = Settings(this)
+        preset = settings.preset
+        applyWindowInsets()
         bindViews()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -120,6 +134,22 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    /**
+     * Android 15+ draws every app edge to edge whether it asks for it or not,
+     * so the layout has to inset itself or the heading ends up behind the
+     * status bar and the counters behind the gesture handle.
+     */
+    private fun applyWindowInsets() {
+        val root = findViewById<View>(R.id.root)
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            WindowInsetsCompat.CONSUMED
+        }
+    }
+
     private fun bindViews() {
         modeGroup = findViewById(R.id.modeGroup)
         presetGroup = findViewById(R.id.presetGroup)
@@ -130,10 +160,14 @@ class MainActivity : AppCompatActivity() {
         peerList = findViewById(R.id.peerList)
         manualIp = findViewById(R.id.manualIp)
         scanButton = findViewById(R.id.scanButton)
+        clearButton = findViewById(R.id.clearButton)
         startButton = findViewById(R.id.startButton)
         statusText = findViewById(R.id.statusText)
+        outputText = findViewById(R.id.outputText)
         statsText = findViewById(R.id.statsText)
         errorText = findViewById(R.id.errorText)
+        estimateText = findViewById(R.id.estimateText)
+        statusDot = findViewById(R.id.statusDot)
         meter = findViewById(R.id.meter)
 
         peerList.adapter = peerAdapter
@@ -150,12 +184,42 @@ class MainActivity : AppCompatActivity() {
                 else -> Latency.BALANCED
             }
             presetHint.text = preset.hint
+            settings.preset = preset
         }
         scanButton.setOnClickListener { discovery.scan() }
+        clearButton.setOnClickListener { clearList() }
         startButton.setOnClickListener { onStartStop() }
+
+        // Restore the preset and the PC used last time.
+        presetGroup.check(
+            when (preset) {
+                Latency.LOW -> R.id.presetLow
+                Latency.STABLE -> R.id.presetStable
+                Latency.BALANCED -> R.id.presetBalanced
+            }
+        )
+        settings.lastHost?.let { host ->
+            manualIp.setText(if (settings.lastPort == Config.AUDIO_PORT) host else "$host:${settings.lastPort}")
+        }
 
         presetHint.text = preset.hint
         applyMode()
+    }
+
+    /**
+     * Empties the discovered list and forgets the saved PC. Anything still
+     * announcing reappears within a second, which is the point: this clears
+     * what is stale, not what is live.
+     */
+    private fun clearList() {
+        discovery.clear()
+        settings.forgetTarget()
+        selectedPeer = null
+        peerList.clearChoices()
+        peerAdapter.clear()
+        peerAdapter.notifyDataSetChanged()
+        manualIp.setText("")
+        StreamStats.errorText = null
     }
 
     private fun applyMode() {
@@ -210,6 +274,9 @@ class MainActivity : AppCompatActivity() {
     private fun refresh() {
         val running = StreamStats.running.get()
         startButton.text = if (running) "STOP" else "START"
+        startButton.setBackgroundResource(if (running) R.drawable.btn_stop else R.drawable.btn_start)
+        startButton.setTextColor(if (running) 0xFFFFF0EE.toInt() else 0xFF0A1A12.toInt())
+        estimateText.text = "~%.0f ms".format(preset.estimateMs())
         modeGroup.isEnabled = !running
         for (i in 0 until presetGroup.childCount) {
             presetGroup.getChildAt(i).isEnabled = !running
@@ -238,6 +305,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         val live = StreamStats.streamLive()
+        val dotColour = when {
+            !running -> ContextCompat.getColor(this, R.color.text_muted)
+            live -> ContextCompat.getColor(this, R.color.green)
+            else -> ContextCompat.getColor(this, R.color.amber)
+        }
+        statusDot.background?.mutate()?.setTint(dotColour)
         statusText.text = when {
             !running -> "Stopped"
             live -> "Streaming — ${StreamStats.peerText ?: ""}"
@@ -245,8 +318,10 @@ class MainActivity : AppCompatActivity() {
             else -> "Connecting..."
         }
 
-        meter.progress = (StreamStats.level().coerceIn(0f, 1f) * 100).toInt()
-
+        // The meter turns amber near clipping, the same as the Windows build.
+        val level = StreamStats.level().coerceIn(0f, 1f)
+        // A square-root curve so quiet material is still visible.
+        meter.progress = (kotlin.math.sqrt(level) * 100).toInt()
         statsText.text = if (running) {
             buildString {
                 append("${StreamStats.blocks.get()} blocks")
@@ -265,8 +340,14 @@ class MainActivity : AppCompatActivity() {
                 if (late > 0) append(" · $late late")
             }
         } else {
-            "~%.0f ms estimated".format(preset.estimateMs())
+            "Idle"
         }
+
+        // Where playback is actually going. Worth showing: "the meter moves
+        // but I hear nothing" is almost always a routing answer.
+        val output = StreamStats.outputText
+        outputText.visibility = if (output == null || !running) View.GONE else View.VISIBLE
+        outputText.text = if (output != null) "Output: $output" else ""
 
         val error = StreamStats.errorText
         errorText.visibility = if (error == null) View.GONE else View.VISIBLE

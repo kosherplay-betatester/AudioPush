@@ -65,6 +65,16 @@ object Net {
         try {
             for (iface in NetworkInterface.getNetworkInterfaces()) {
                 if (!iface.isUp || iface.isLoopback) continue
+                // Cellular interfaces carry an address the PC can never reach,
+                // and listing them only invites typing the wrong one into the
+                // sender.
+                val name = iface.name.lowercase()
+                if (name.startsWith("rmnet") || name.startsWith("ccmni") ||
+                    name.startsWith("pdp") || name.startsWith("clat") ||
+                    name.startsWith("dummy")
+                ) {
+                    continue
+                }
                 for (ia in iface.interfaceAddresses) {
                     val address = ia.address
                     if (address is Inet4Address && !address.isLinkLocalAddress) {
@@ -223,6 +233,15 @@ class DiscoveryListener {
             isDaemon = true
             start()
         }
+    }
+
+    /**
+     * Empties the list. Anything still announcing reappears within a second,
+     * which is the point: this clears what is stale, not what is live.
+     */
+    @Synchronized
+    fun clear() {
+        peers.clear()
     }
 
     fun stop() {

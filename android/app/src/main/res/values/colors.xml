@@ -1,4 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#1B2430</color>
+    <!-- Dark palette. The app is a utility you glance at in a dim room, so
+         contrast is kept moderate and one accent carries the whole UI. -->
+    <color name="bg">#0F141B</color>
+    <color name="surface">#19212C</color>
+    <color name="surface_raised">#232E3C</color>
+    <color name="stroke">#2E3B4C</color>
+
+    <color name="accent">#4CC2FF</color>
+    <color name="accent_dim">#2B6E92</color>
+
+    <color name="green">#46C88C</color>
+    <color name="amber">#E6B43C</color>
+    <color name="red">#D4564F</color>
+
+    <color name="text_primary">#E8EEF5</color>
+    <color name="text_secondary">#93A2B4</color>
+    <color name="text_muted">#64748B</color>
+
+    <color name="ic_launcher_background">#0F141B</color>
 </resources>

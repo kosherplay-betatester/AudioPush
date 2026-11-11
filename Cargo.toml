@@ -1,6 +1,6 @@
 [package]
 name = "audiopush"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Stream Windows system audio to another PC on the LAN with minimal latency"
 license = "MIT"
@@ -8,8 +8,11 @@ license = "MIT"
 [dependencies]
 # Immediate-mode GUI, compiled into the binary. No runtime, no web view.
 eframe = "0.37.0"
+hmac = "0.13.0"
 # Enumerating local IPv4 addresses for discovery, the scan and the receiver screen.
 if-addrs = "0.15.0"
+rand = "0.10.3"
+sha2 = "0.11.1"
 # Optional notification-area icon.
 tray-icon = "0.26.1"
 # Event-driven WASAPI loopback capture and render.

@@ -30,7 +30,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 class SenderEngine(
     private val projection: MediaProjection,
     private val destination: InetAddress,
-    private val destinationPort: Int
+    private val destinationPort: Int,
+    /** The pairing shared with that PC. */
+    private val token: Token
 ) {
     private val stop = AtomicBoolean(false)
     private val ring = BlockRing(Config.RING_BLOCKS)
@@ -170,7 +172,7 @@ class SenderEngine(
                 }
 
                 val tsUs = ((System.nanoTime() - startedNs) / 1000L).toInt()
-                Protocol.encodeAudio(packet, seq, tsUs, block)
+                Protocol.encodeAudio(packet, Protocol.MAGIC, token, seq, tsUs, block)
                 seq++
                 nextSendNs += blockNs
                 if (nextSendNs + blockNs * 2 < System.nanoTime()) {

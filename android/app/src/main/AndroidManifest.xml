@@ -8,6 +8,10 @@
          never arrives. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Streaming must survive the screen going off. A foreground service is
+         not enough on its own: Doze and vendor battery managers still freeze
+         the CPU and defer network traffic, which stops the audio dead. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- AudioPlaybackCapture is an AudioRecord source, so it needs this even
          though no microphone is involved. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />

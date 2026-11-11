@@ -10,6 +10,7 @@ mod audio;
 mod config;
 mod engine;
 mod net;
+mod pairing;
 mod priority;
 mod ring;
 mod settings;

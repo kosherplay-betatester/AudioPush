@@ -26,11 +26,25 @@ class StreamService : Service() {
 
     private var receiver: ReceiverEngine? = null
     private var sender: SenderEngine? = null
+    private var mic: MicEngine? = null
+    private lateinit var settings: Settings
+
+    /**
+     * Issues this device's pairing PIN while it is receiving. A single
+     * instance for the process, so the PIN the UI shows is the one the
+     * announcer thread checks against.
+     */
+    private val pairingHost: PairingHost get() = sharedPairingHost
     private var announcer: Announcer? = null
     private var locks: WifiLocks? = null
     private var projection: MediaProjection? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        settings = Settings(this)
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -55,9 +69,25 @@ class StreamService : Service() {
         )
 
         locks = WifiLocks(this).also { it.acquire() }
-        receiver = ReceiverEngine(this, preset).also { it.start() }
+
+        // The return microphone stream is optional and off unless asked for.
+        // It only ever runs alongside the receiver, and only while it runs is
+        // the microphone open at all.
+        val wantsMic = intent.getBooleanExtra(EXTRA_MIC, false)
+        val micTarget = if (wantsMic) PeerTarget() else null
+
+        // Only machines this device has paired with may stream to it.
+        val tokens = TokenStore(settings.allTokens())
+        receiver = ReceiverEngine(this, preset, tokens, micTarget).also { it.start() }
+        if (micTarget != null) {
+            mic = MicEngine(this, micTarget).also { it.start() }
+        }
         // Announce so the PC finds this phone by name instead of by IP.
-        announcer = Announcer(Config.AUDIO_PORT).also { it.start() }
+        announcer = Announcer(Config.AUDIO_PORT, pairingHost, tokens) { address, token ->
+            // Persist the pairing so it survives a restart.
+            val host = address.hostAddress ?: return@Announcer
+            settings.addPairing(host, host, token)
+        }.also { it.start() }
     }
 
     private fun startSender(intent: Intent) {
@@ -114,8 +144,19 @@ class StreamService : Service() {
             }
         }, null)
 
+        // Without a pairing there is nothing to sign packets with, and the
+        // PC would reject every one of them.
+        val token = settings.tokenFor(host)
+        if (token == null) {
+            StreamStats.errorText = "Not paired with $host yet."
+            runCatching { media.stop() }
+            stopSelf()
+            return
+        }
+
         locks = WifiLocks(this).also { it.acquire() }
-        sender = SenderEngine(media, InetAddress.getByName(host), port).also { it.start() }
+        sender = SenderEngine(media, InetAddress.getByName(host), port, token)
+            .also { it.start() }
     }
 
     private fun presetFrom(intent: Intent): Latency {
@@ -125,11 +166,13 @@ class StreamService : Service() {
 
     private fun stopEverything() {
         announcer?.stop()
+        mic?.stop()
         receiver?.stop()
         sender?.stop()
         locks?.release()
         runCatching { projection?.stop() }
         announcer = null
+        mic = null
         receiver = null
         sender = null
         locks = null
@@ -185,10 +228,17 @@ class StreamService : Service() {
     }
 
     companion object {
+        /**
+         * Shared between the service and the UI: the activity shows the
+         * PIN, the service's announcer thread checks answers against it.
+         */
+        val sharedPairingHost = PairingHost()
+
         const val ACTION_START_RECEIVER = "com.kosherplay.audiopush.START_RECEIVER"
         const val ACTION_START_SENDER = "com.kosherplay.audiopush.START_SENDER"
         const val ACTION_STOP = "com.kosherplay.audiopush.STOP"
         const val EXTRA_PRESET = "preset"
+        const val EXTRA_MIC = "mic"
         const val EXTRA_HOST = "host"
         const val EXTRA_PORT = "port"
         const val EXTRA_RESULT_CODE = "resultCode"

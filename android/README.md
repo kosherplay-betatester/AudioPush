@@ -153,3 +153,38 @@ actually sending playback, which separates three faults that look identical:
 
 This is also logged, so `adb logcat -s AudioPush` shows the routed device and
 every available output at the moment the track opened.
+
+---
+
+## Keeping it playing with the screen off
+
+A foreground service is not enough on its own. Android's Doze defers network
+traffic for apps it considers idle, and vendor battery managers freeze them
+outright — which is why a stream goes silent a minute after you lock the
+phone. AudioPush does three things about it:
+
+1. **Holds a partial wake lock** while streaming, so the receiving and mixing
+   threads keep running with the screen off. Released the moment you stop.
+2. **Holds a `WIFI_MODE_FULL_LOW_LATENCY` WiFi lock**, so the radio does not
+   park between beacons.
+3. **Asks you to allow background running.** The card at the top of the
+   screen stays there until you do; tapping it opens the system dialog. Only
+   you can grant this, so the app cannot do it quietly.
+
+### Xiaomi, HyperOS and MIUI
+
+These are more aggressive than stock Android and need three more settings,
+none of which an app can set for you:
+
+- **Settings → Apps → AudioPush → Battery saver → No restrictions**
+- **Settings → Apps → AudioPush → Autostart → on**
+- Open Recents, swipe down on the AudioPush card (or long-press it) and
+  **lock** it, so clearing recents does not kill it.
+
+Samsung (*Never sleeping apps*), Huawei (*App launch → Manage manually*) and
+OnePlus (*Battery optimisation → Don't optimise*) have equivalents.
+
+If audio still stops, check whether the AudioPush notification is still in
+the shade. If it has gone, the system killed the service and the settings
+above are the fix. If it is still there but silent, it is the network being
+deferred — which is what the battery exemption addresses.

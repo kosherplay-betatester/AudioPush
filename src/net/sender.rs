@@ -1,17 +1,20 @@
-//! Sender side: drains the capture ring into UDP datagrams.
+//! Drains an audio ring into UDP datagrams.
 //!
-//! Deliberately dumb: one block per datagram, no acknowledgements, no
-//! retransmission and no blocking. If a send fails we count it and carry on,
-//! because stalling here would back up into the audio thread.
+//! Used for both directions: the main stream from the workstation, and the
+//! return microphone stream from the receiver. Deliberately dumb: one block
+//! per datagram, no acknowledgements, no retransmission and no blocking. If a
+//! send fails we count it and carry on, because stalling here would back up
+//! into the audio thread.
 
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::config::{BLOCK_SAMPLES, FRAMES_PER_BLOCK, SAMPLE_RATE};
 use crate::net::protocol::{PACKET_LEN, encode_audio};
+use crate::pairing::TokenSlot;
 use crate::ring::BlockRing;
 use crate::state::{Shared, now_ms};
 
@@ -28,8 +31,19 @@ const BLOCK_DURATION: Duration =
 /// Pacing is there to smooth delivery, never to hold audio back.
 const PACE_BACKLOG: usize = 3;
 
+/// Where to send. A shared slot rather than a fixed address because the
+/// microphone stream only learns its destination once the main stream has
+/// told the receiver who the sender is.
+pub type Target = Arc<Mutex<Option<SocketAddr>>>;
+
+pub fn new_target(addr: Option<SocketAddr>) -> Target {
+    Arc::new(Mutex::new(addr))
+}
+
 pub fn spawn(
-    dest: SocketAddr,
+    target: Target,
+    token: TokenSlot,
+    magic: [u8; 4],
     ring: Arc<BlockRing>,
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
@@ -44,18 +58,16 @@ pub fn spawn(
                     return;
                 }
             };
-            // A send buffer large enough that a brief scheduling hiccup in the
-            // network stack does not cost us packets.
             let _ = socket.set_nonblocking(false);
 
             shared.set_net_error(None);
-            shared.set_peer(Some(dest.to_string()));
 
             let mut packet = [0u8; PACKET_LEN];
             let mut block = [0i16; BLOCK_SAMPLES];
             let mut seq: u32 = 0;
             let started = Instant::now();
             let mut consecutive_errors = 0u32;
+            let mut last_peer: Option<SocketAddr> = None;
 
             // Pacing clock: the time the next datagram is due to leave.
             let mut next_send = Instant::now();
@@ -66,6 +78,23 @@ pub fn spawn(
                     // Do not let the schedule fall behind while idle.
                     next_send = next_send.max(Instant::now());
                     continue;
+                }
+
+                // Both the destination and the key to sign with: the
+                // microphone stream learns them together, when the first
+                // audio packet tells the receiver who is streaming to it.
+                let signing_key = token.lock().ok().and_then(|t| t.clone());
+                let (Some(dest), Some(signing_key)) =
+                    (target.lock().ok().and_then(|t| *t), signing_key)
+                else {
+                    // No destination yet. The block has already been taken
+                    // from the ring, so it is simply dropped: holding it would
+                    // only stale the buffer.
+                    continue;
+                };
+                if last_peer != Some(dest) {
+                    shared.set_peer(Some(dest.to_string()));
+                    last_peer = Some(dest);
                 }
 
                 // --- pacing ------------------------------------------------
@@ -91,7 +120,7 @@ pub fn spawn(
                 }
 
                 let ts_us = started.elapsed().as_micros() as u32;
-                encode_audio(&mut packet, seq, ts_us, &block);
+                encode_audio(&mut packet, magic, &signing_key, seq, ts_us, &block);
                 seq = seq.wrapping_add(1);
 
                 next_send += BLOCK_DURATION;

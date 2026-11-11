@@ -6,7 +6,7 @@
 //! so that COM apartments never collide with winit.
 
 use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -16,11 +16,13 @@ use wasapi::Direction;
 
 use crate::audio::devices::{self, DeviceInfo};
 use crate::config::{AUDIO_PORT, BLOCK_MS, Latency, PEER_TIMEOUT_MS, STREAM_TIMEOUT_MS};
-use crate::engine::Session;
-use crate::net::discovery::{self, PeerList};
+use crate::engine::{MicConfig, Session};
+use crate::net::discovery::{self, PairingQueue, PeerList};
+use crate::net::pair::{PairingHost, pair_with};
 use crate::net::scan::{self, ScanProgress};
 use crate::net::{LocalAddress, hostname, local_addresses};
-use crate::settings::Settings;
+use crate::pairing::{Pin, Token, TokenStore};
+use crate::settings::{Pairing, Recent, Settings};
 use crate::state::{Peer, Shared, now_ms};
 use crate::tray::Tray;
 
@@ -56,6 +58,7 @@ pub struct AudioPushApp {
 
     // Sender-side state
     output_devices: Vec<DeviceInfo>,
+    input_devices: Vec<DeviceInfo>,
     capture_device: Option<String>,
     peers: PeerList,
     discovery: Option<Discovery>,
@@ -69,6 +72,26 @@ pub struct AudioPushApp {
     // Receiver-side state
     playback_device: Option<String>,
     local_ips: Vec<LocalAddress>,
+
+    // Return microphone stream
+    mic_enabled: bool,
+    mic_input_device: Option<String>,
+    mic_output_device: Option<String>,
+    /// Counters and level for the microphone stream, kept apart from the
+    /// main one so one stream failing cannot blank the other's readout.
+    mic_shared: Arc<Shared>,
+
+    // Pairing
+    /// Issues this machine's PIN while it is receiving.
+    pairing_host: Arc<PairingHost>,
+    /// Senders that have just paired, waiting to be written to settings.
+    pairing_queue: PairingQueue,
+    /// What the user is typing when pairing with a receiver.
+    pin_input: String,
+    /// Result of a pairing attempt, filled in by its worker thread.
+    pairing_result: Arc<Mutex<Option<Result<(Token, String), String>>>>,
+    pairing_busy: bool,
+    pairing_error: Option<String>,
 
     // Remembered between runs
     settings: Settings,
@@ -86,12 +109,17 @@ impl AudioPushApp {
 
         // Pick up what was chosen last time, so a repeat run is one click.
         let settings = Settings::load();
-        let target = settings.last_target;
-        let target_label = match (&settings.last_target_name, target) {
-            (name, Some(addr)) if !name.is_empty() => format!("{name} ({})", addr.ip()),
-            (_, Some(addr)) => addr.to_string(),
-            _ => String::new(),
-        };
+        let target = settings.most_recent().map(|r| r.addr);
+        let target_label = settings
+            .most_recent()
+            .map(|r| {
+                if r.name.is_empty() {
+                    r.addr.to_string()
+                } else {
+                    format!("{} ({})", r.name, r.addr.ip())
+                }
+            })
+            .unwrap_or_default();
 
         AudioPushApp {
             screen: Screen::Chooser,
@@ -99,6 +127,7 @@ impl AudioPushApp {
             shared: Arc::new(Shared::new()),
             session: None,
             output_devices: list_devices(Direction::Render),
+            input_devices: list_devices(Direction::Capture),
             capture_device: settings.capture_device.clone(),
             peers: discovery::new_peer_list(),
             discovery: None,
@@ -110,6 +139,16 @@ impl AudioPushApp {
             target_label,
             playback_device: settings.playback_device.clone(),
             local_ips: local_addresses(),
+            mic_enabled: settings.mic_enabled,
+            mic_input_device: settings.mic_input_device.clone(),
+            mic_output_device: settings.mic_output_device.clone(),
+            mic_shared: Arc::new(Shared::new()),
+            pairing_host: Arc::new(PairingHost::new()),
+            pairing_queue: discovery::new_pairing_queue(),
+            pin_input: String::new(),
+            pairing_result: Arc::new(Mutex::new(None)),
+            pairing_busy: false,
+            pairing_error: None,
             settings,
             tray: None,
             hidden: false,
@@ -167,6 +206,7 @@ impl AudioPushApp {
 
     fn refresh_devices(&mut self) {
         self.output_devices = list_devices(Direction::Render);
+        self.input_devices = list_devices(Direction::Capture);
         self.device_refresh = Instant::now();
     }
 
@@ -188,6 +228,18 @@ impl AudioPushApp {
             self.settings.playback_device = self.playback_device.clone();
             dirty = true;
         }
+        if self.settings.mic_enabled != self.mic_enabled {
+            self.settings.mic_enabled = self.mic_enabled;
+            dirty = true;
+        }
+        if self.settings.mic_input_device != self.mic_input_device {
+            self.settings.mic_input_device = self.mic_input_device.clone();
+            dirty = true;
+        }
+        if self.settings.mic_output_device != self.mic_output_device {
+            self.settings.mic_output_device = self.mic_output_device.clone();
+            dirty = true;
+        }
         if dirty {
             self.settings.save();
         }
@@ -202,8 +254,10 @@ impl AudioPushApp {
             format!("{name} ({})", addr.ip())
         };
         self.manual_error = None;
-        self.settings.last_target = Some(addr);
-        self.settings.last_target_name = name.to_string();
+        self.settings.push_recent(Recent {
+            addr,
+            name: name.to_string(),
+        });
         self.settings.save();
     }
 
@@ -219,7 +273,7 @@ impl AudioPushApp {
         self.target_label.clear();
         self.manual_ip.clear();
         self.manual_error = None;
-        self.settings.forget_target();
+        self.settings.clear_recent();
     }
 
     fn live_peers(&self) -> Vec<Peer> {
@@ -242,6 +296,7 @@ impl eframe::App for AudioPushApp {
         ctx.request_repaint_after(Duration::from_millis(80));
 
         self.handle_tray(ctx);
+        self.drain_new_pairings();
 
         // Cheap periodic refreshes so hot-plugged hardware shows up.
         if self.device_refresh.elapsed() > Duration::from_secs(5) && !self.streaming() {
@@ -396,7 +451,7 @@ impl AudioPushApp {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_min_height(74.0);
             ui.set_width(ui.available_width());
-            if peers.is_empty() && self.settings.last_target.is_none() {
+            if peers.is_empty() && self.settings.recent.is_empty() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(8.0);
                     ui.label(
@@ -422,26 +477,26 @@ impl AudioPushApp {
                 }
             }
 
-            // The receiver used last time, when it is not announcing right
-            // now. Offered anyway: it is usually just not started yet, and
-            // streaming to it will work the moment it is.
-            if let Some(saved) = self.settings.last_target {
-                if !peers.iter().any(|p| p.addr == saved) {
-                    let selected = self.target == Some(saved);
-                    let name = if self.settings.last_target_name.is_empty() {
-                        saved.ip().to_string()
-                    } else {
-                        self.settings.last_target_name.clone()
-                    };
-                    let label = format!("{}  —  {}   (last used)", name, saved.ip());
-                    if ui
-                        .selectable_label(selected, egui::RichText::new(label).weak())
-                        .on_hover_text("Saved from a previous run; not announcing right now")
-                        .clicked()
-                        && !streaming
-                    {
-                        self.remember_target(saved, &name);
-                    }
+            // Receivers used before, when they are not announcing right
+            // now. Offered anyway: usually one is simply not started yet,
+            // and streaming to it will work the moment it is.
+            let saved: Vec<Recent> = self
+                .settings
+                .recent
+                .iter()
+                .filter(|entry| !peers.iter().any(|p| p.addr == entry.addr))
+                .cloned()
+                .collect();
+            for entry in saved {
+                let selected = self.target == Some(entry.addr);
+                let label = format!("{}   (recent)", entry.label());
+                if ui
+                    .selectable_label(selected, egui::RichText::new(label).weak())
+                    .on_hover_text("Used before; not announcing right now")
+                    .clicked()
+                    && !streaming
+                {
+                    self.remember_target(entry.addr, &entry.name);
                 }
             }
         });
@@ -507,6 +562,8 @@ impl AudioPushApp {
             ui.colored_label(egui::Color32::from_rgb(235, 120, 100), err);
         }
 
+        self.pairing_ui(ui);
+        self.mic_ui(ui, true);
         self.latency_ui(ui);
         self.start_stop_ui(ui, true);
         self.status_ui(ui, true);
@@ -588,6 +645,8 @@ impl AudioPushApp {
             );
         });
 
+        self.pin_ui(ui);
+        self.mic_ui(ui, false);
         self.latency_ui(ui);
         self.start_stop_ui(ui, false);
         self.status_ui(ui, false);
@@ -629,6 +688,341 @@ impl AudioPushApp {
         ui.separator();
     }
 
+    /// Sender side: prove we know the receiver's PIN, and keep the token.
+    ///
+    /// Shown only while the chosen receiver is unpaired. Once paired, the
+    /// token is stored and this never appears for that machine again.
+    fn pairing_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(target) = self.target else { return };
+        if self.settings.token_for(target.ip()).is_some() {
+            return;
+        }
+
+        // Collect the result of a pairing attempt running on its own thread.
+        if self.pairing_busy {
+            let finished = self
+                .pairing_result
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take());
+            if let Some(outcome) = finished {
+                self.pairing_busy = false;
+                match outcome {
+                    Ok((token, name)) => {
+                        self.settings.add_pairing(Pairing {
+                            ip: target.ip(),
+                            name: name.clone(),
+                            token,
+                        });
+                        self.pairing_error = None;
+                        self.pin_input.clear();
+                        // Keep the friendlier name now that we know it.
+                        self.remember_target(target, &name);
+                    }
+                    Err(message) => self.pairing_error = Some(message),
+                }
+            }
+        }
+
+        ui.add_space(10.0);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new("This receiver is not paired yet").strong());
+            ui.label(
+                egui::RichText::new(
+                    "Read the six-digit PIN from the receiver's screen and type it here. \
+                     You only do this once per machine.",
+                )
+                .color(egui::Color32::GRAY)
+                .small(),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_enabled(
+                    !self.pairing_busy,
+                    egui::TextEdit::singleline(&mut self.pin_input)
+                        .hint_text("123 456")
+                        .desired_width(110.0),
+                );
+                let pin = Pin::parse(&self.pin_input);
+                if ui
+                    .add_enabled(
+                        pin.is_some() && !self.pairing_busy,
+                        egui::Button::new("Pair"),
+                    )
+                    .clicked()
+                {
+                    if let Some(pin) = pin {
+                        self.pairing_busy = true;
+                        self.pairing_error = None;
+                        // Off the GUI thread: it waits on the network.
+                        let slot = Arc::clone(&self.pairing_result);
+                        let ip = target.ip();
+                        std::thread::spawn(move || {
+                            let outcome = pair_with(ip, &pin);
+                            if let Ok(mut slot) = slot.lock() {
+                                *slot = Some(outcome);
+                            }
+                        });
+                    }
+                }
+                if self.pairing_busy {
+                    ui.spinner();
+                }
+            });
+            if let Some(error) = &self.pairing_error {
+                ui.colored_label(egui::Color32::from_rgb(235, 120, 100), error);
+            }
+        });
+    }
+
+    /// Receiver side: show the PIN that authorises a sender.
+    fn pin_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new("Pairing").strong());
+
+            match self.pairing_host.display_pin() {
+                Some(pin) => {
+                    ui.label(
+                        egui::RichText::new(pin)
+                            .monospace()
+                            .size(30.0)
+                            .color(egui::Color32::from_rgb(120, 200, 255)),
+                    );
+                    let left = self
+                        .pairing_host
+                        .window_remaining()
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Type this on the sender. Open for {left}s."
+                        ))
+                        .color(egui::Color32::GRAY)
+                        .small(),
+                    );
+                    if ui.small_button("Cancel").clicked() {
+                        self.pairing_host.close_window();
+                    }
+                }
+                None => {
+                    if ui
+                        .button("Pair a new device")
+                        .on_hover_text(
+                            "Shows a PIN for two minutes. Pairing is refused at every \
+                             other moment, which is what keeps six digits safe.",
+                        )
+                        .clicked()
+                    {
+                        self.pairing_host.open_window();
+                    }
+                    ui.label(
+                        egui::RichText::new(if self.streaming() {
+                            "Machines already paired connect without a PIN."
+                        } else {
+                            "Press START first: a PIN is only answered while running."
+                        })
+                        .color(egui::Color32::GRAY)
+                        .small(),
+                    );
+                }
+            }
+
+            if let Some(left) = self.pairing_host.locked_for() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 180, 60),
+                    format!(
+                        "Too many wrong attempts. Pairing is refused for {}s.",
+                        left.as_secs()
+                    ),
+                );
+            }
+
+            let paired = self.settings.pairings.len();
+            if paired > 0 {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{paired} paired machine{}",
+                            if paired == 1 { "" } else { "s" }
+                        ))
+                        .color(egui::Color32::GRAY)
+                        .small(),
+                    );
+                    if ui
+                        .small_button("Revoke all")
+                        .on_hover_text(
+                            "Forgets every pairing on this machine. Each one must pair \
+                             again before it can send audio or receive your microphone.",
+                        )
+                        .clicked()
+                    {
+                        self.settings.clear_pairings();
+                    }
+                });
+            }
+        });
+    }
+
+    /// Writes newly issued pairings to disk, so they survive a restart.
+    fn drain_new_pairings(&mut self) {
+        let fresh: Vec<_> = self
+            .pairing_queue
+            .lock()
+            .map(|mut queue| queue.drain(..).collect())
+            .unwrap_or_default();
+        for pairing in fresh {
+            self.settings.add_pairing(Pairing {
+                ip: pairing.peer,
+                name: pairing.peer.to_string(),
+                token: pairing.token,
+            });
+        }
+    }
+
+    /// The return microphone stream.
+    ///
+    /// On the receiver this is "lend my microphone to the workstation"; on
+    /// the sender it is "where do I play the microphone that arrives". They
+    /// are two halves of one switch, so they share a section.
+    fn mic_ui(&mut self, ui: &mut egui::Ui, is_sender: bool) {
+        ui.add_space(12.0);
+        let streaming = self.streaming();
+
+        ui.add_enabled_ui(!streaming, |ui| {
+            let label = if is_sender {
+                "Use the receiver's microphone"
+            } else {
+                "Send this PC's microphone to the sender"
+            };
+            ui.checkbox(&mut self.mic_enabled, egui::RichText::new(label).strong());
+        });
+
+        if !self.mic_enabled {
+            ui.label(
+                egui::RichText::new(if is_sender {
+                    "Off: nothing listens on the microphone port."
+                } else {
+                    "Off: this PC's microphone is never opened."
+                })
+                .color(egui::Color32::GRAY)
+                .small(),
+            );
+            return;
+        }
+
+        // Device picker: an input endpoint on the receiver, an output
+        // endpoint on the sender (because that is where the voice is played).
+        let devices = if is_sender {
+            &self.output_devices
+        } else {
+            &self.input_devices
+        };
+        let selected_id = if is_sender {
+            &self.mic_output_device
+        } else {
+            &self.mic_input_device
+        };
+        let default_text = if is_sender {
+            "Default output (follow Windows)"
+        } else {
+            "Default microphone (follow Windows)"
+        };
+        let selected_name = selected_id
+            .as_ref()
+            .and_then(|id| devices.iter().find(|d| &d.id == id).map(|d| d.name.clone()))
+            .unwrap_or_else(|| default_text.to_string());
+
+        let options: Vec<(String, String)> = devices
+            .iter()
+            .map(|d| (d.id.clone(), d.name.clone()))
+            .collect();
+
+        ui.add_enabled_ui(!streaming, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(if is_sender { "Play it into" } else { "Microphone" });
+                egui::ComboBox::from_id_salt(if is_sender { "mic-out" } else { "mic-in" })
+                    .width(ui.available_width() - 8.0)
+                    .selected_text(selected_name)
+                    .show_ui(ui, |ui| {
+                        let slot = if is_sender {
+                            &mut self.mic_output_device
+                        } else {
+                            &mut self.mic_input_device
+                        };
+                        ui.selectable_value(slot, None, default_text);
+                        for (id, name) in &options {
+                            ui.selectable_value(slot, Some(id.clone()), name);
+                        }
+                    });
+            });
+        });
+
+        if is_sender {
+            ui.label(
+                egui::RichText::new(
+                    "Windows cannot expose a microphone from an ordinary app, so the voice \
+                     is played into an output device. To use it as a microphone elsewhere, \
+                     install VB-CABLE, play into \"CABLE Input\" here, and select \
+                     \"CABLE Output\" as the microphone in OBS, Discord or your recorder.",
+                )
+                .color(egui::Color32::GRAY)
+                .small(),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new(
+                    "The microphone opens only while streaming, and only with this box \
+                     ticked. It is sent to whichever PC is streaming audio to this one.",
+                )
+                .color(egui::Color32::GRAY)
+                .small(),
+            );
+        }
+
+        if streaming {
+            ui.add_space(4.0);
+            if !is_sender {
+                // Where the microphone is actually going. Latched for the
+                // session on the first packet received, so it is worth
+                // showing: a microphone whose destination is invisible is a
+                // microphone you cannot trust.
+                let destination = Shared::get_string(&self.mic_shared.peer)
+                    .unwrap_or_else(|| "waiting for the sender...".to_string());
+                ui.label(
+                    egui::RichText::new(format!("Microphone going to {destination}"))
+                        .color(egui::Color32::from_rgb(120, 170, 235))
+                        .small(),
+                );
+            }
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Mic").small().color(egui::Color32::GRAY));
+                let level = self.mic_shared.level().clamp(0.0, 1.0).powf(0.5);
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 10.0),
+                    egui::Sense::hover(),
+                );
+                let radius = egui::CornerRadius::same(3);
+                ui.painter()
+                    .rect_filled(rect, radius, egui::Color32::from_gray(32));
+                if level > 0.001 {
+                    let mut filled = rect;
+                    filled.set_width(rect.width() * level);
+                    ui.painter().rect_filled(
+                        filled,
+                        radius,
+                        egui::Color32::from_rgb(120, 170, 235),
+                    );
+                }
+            });
+            if let Some(error) = Shared::get_string(&self.mic_shared.audio_error) {
+                ui.colored_label(egui::Color32::from_rgb(235, 120, 100), error);
+            }
+        }
+    }
+
     fn latency_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(12.0);
         ui.label(egui::RichText::new("Latency").strong());
@@ -661,7 +1055,13 @@ impl AudioPushApp {
     fn start_stop_ui(&mut self, ui: &mut egui::Ui, is_sender: bool) {
         ui.add_space(14.0);
         let streaming = self.streaming();
-        let can_start = if is_sender { self.target.is_some() } else { true };
+        let can_start = if is_sender {
+            self.target
+                .map(|t| self.settings.token_for(t.ip()).is_some())
+                .unwrap_or(false)
+        } else {
+            true
+        };
 
         let text = if streaming { "STOP" } else { "START" };
         let colour = if streaming {
@@ -679,12 +1079,20 @@ impl AudioPushApp {
             if streaming {
                 self.stop_session();
             } else if is_sender {
-                if let Some(target) = self.target {
+                if let (Some(target), Some(token)) =
+                    (self.target, self.target.and_then(|t| self.settings.token_for(t.ip())))
+                {
                     self.session = Some(Session::start_sender(
                         self.capture_device.clone(),
                         self.preset,
                         target,
+                        token,
                         Arc::clone(&self.shared),
+                        MicConfig {
+                            enabled: self.mic_enabled,
+                            device_id: self.mic_output_device.clone(),
+                        },
+                        Arc::clone(&self.mic_shared),
                     ));
                 }
             } else {
@@ -692,14 +1100,26 @@ impl AudioPushApp {
                     self.playback_device.clone(),
                     self.preset,
                     AUDIO_PORT,
+                    Arc::new(TokenStore::new(self.settings.all_tokens())),
+                    Arc::clone(&self.pairing_host),
+                    Arc::clone(&self.pairing_queue),
                     Arc::clone(&self.shared),
+                    MicConfig {
+                        enabled: self.mic_enabled,
+                        device_id: self.mic_input_device.clone(),
+                    },
+                    Arc::clone(&self.mic_shared),
                 ));
             }
         }
 
         if is_sender && !can_start {
             ui.label(
-                egui::RichText::new("Pick a receiver above first.")
+                egui::RichText::new(if self.target.is_some() {
+                    "Pair with this receiver first."
+                } else {
+                    "Pick a receiver above first."
+                })
                     .color(egui::Color32::GRAY)
                     .small(),
             );

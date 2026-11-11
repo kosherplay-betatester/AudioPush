@@ -45,6 +45,21 @@ data class LocalAddress(val interfaceName: String, val ip: Inet4Address, val pre
     }
 }
 
+/**
+ * Where the return microphone stream should go.
+ *
+ * Empty until the first audio packet arrives: a receiver cannot know who is
+ * streaming to it in advance, it finds out when someone does.
+ */
+class PeerTarget {
+    @Volatile
+    var address: InetAddress? = null
+
+    /** The pairing the accepted sender authenticated with. */
+    @Volatile
+    var token: Token? = null
+}
+
 object Net {
     /** This device's name, as the receiver advertises it. */
     fun deviceName(): String {
@@ -101,6 +116,18 @@ object Net {
 class WifiLocks(context: Context) {
     private val wifi = context.applicationContext
         .getSystemService(Context.WIFI_SERVICE) as WifiManager
+
+    /**
+     * Keeps the CPU running with the screen off.
+     *
+     * A foreground service keeps the process from being killed, but it does
+     * not keep the processor awake: with the screen off the threads doing the
+     * receiving and the mixing get suspended and the audio stops. This is
+     * what holds them running, and it is released the moment streaming ends.
+     */
+    private val cpuLock = (context.applicationContext
+        .getSystemService(Context.POWER_SERVICE) as android.os.PowerManager)
+        .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "AudioPush:stream")
     private val multicast = wifi.createMulticastLock("audiopush")
     private val wifiLock = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
         wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "audiopush")
@@ -118,11 +145,30 @@ class WifiLocks(context: Context) {
             wifiLock.setReferenceCounted(false)
             wifiLock.acquire()
         }
+        runCatching {
+            cpuLock.setReferenceCounted(false)
+            cpuLock.acquire()
+        }
     }
 
     fun release() {
         runCatching { if (multicast.isHeld) multicast.release() }
         runCatching { if (wifiLock.isHeld) wifiLock.release() }
+        runCatching { if (cpuLock.isHeld) cpuLock.release() }
+    }
+
+    companion object {
+        /**
+         * Whether the system will leave this app alone with the screen off.
+         *
+         * Doze defers network traffic for apps that are not exempt, which is
+         * exactly what silences a stream a minute after the phone is locked.
+         */
+        fun batteryOptimised(context: Context): Boolean {
+            val power = context.applicationContext
+                .getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            return !power.isIgnoringBatteryOptimizations(context.packageName)
+        }
     }
 }
 
@@ -130,7 +176,13 @@ class WifiLocks(context: Context) {
  * Announces this device as an available receiver, once a second, on every
  * interface, and answers scan probes immediately.
  */
-class Announcer(private val audioPort: Int) {
+class Announcer(
+    private val audioPort: Int,
+    private val host: PairingHost,
+    private val tokens: TokenStore,
+    /** Called when a new sender pairs, so the caller can persist it. */
+    private val onPaired: (InetAddress, Token) -> Unit
+) {
     private val stop = AtomicBoolean(false)
     private var thread: Thread? = null
 
@@ -170,11 +222,37 @@ class Announcer(private val audioPort: Int) {
                 try {
                     val packet = DatagramPacket(buffer, buffer.size)
                     socket.receive(packet)
-                    val message = Protocol.decodeDiscovery(packet.data, packet.length)
-                    if (message is Protocol.Discovery.Probe) {
-                        socket.send(
+                    when (val message =
+                        Protocol.decodeDiscovery(packet.data, packet.length)) {
+                        // Answer scan probes straight away.
+                        is Protocol.Discovery.Probe -> socket.send(
                             DatagramPacket(payload, payload.size, packet.address, packet.port)
                         )
+                        // A sender proving it knows the PIN on screen.
+                        is Protocol.Discovery.PairRequest -> {
+                            val reply = when (val outcome =
+                                host.handleRequest(message.nonce, message.proof)) {
+                                is PairingHost.Outcome.Paired -> {
+                                    // Trust it at once, so the sender can
+                                    // start without a restart, and persist it.
+                                    tokens.add(outcome.token)
+                                    onPaired(packet.address, outcome.token)
+                                    Protocol.encodePairAccept(
+                                        outcome.token,
+                                        Net.deviceName(),
+                                        host.acceptProof(message.nonce, outcome.token)
+                                    )
+                                }
+                                is PairingHost.Outcome.Refused ->
+                                    Protocol.encodePairReject(outcome.reason)
+                            }
+                            socket.send(
+                                DatagramPacket(
+                                    reply, reply.size, packet.address, packet.port
+                                )
+                            )
+                        }
+                        else -> {}
                     }
                 } catch (_: Exception) {
                     // Receive timeout: the normal case between probes.

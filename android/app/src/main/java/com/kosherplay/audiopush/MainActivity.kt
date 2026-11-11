@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.widget.ArrayAdapter
+import android.widget.CheckBox
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -39,6 +40,9 @@ class MainActivity : AppCompatActivity() {
     private var preset = Latency.BALANCED
     private val discovery = DiscoveryListener()
     private var selectedPeer: Peer? = null
+    private var selectedRecent: Recent? = null
+    /// The list currently shown: live peers first, then remembered ones.
+    private var shownTargets: List<Pair<String, Int>> = emptyList()
     private lateinit var settings: Settings
 
     private val ui = Handler(Looper.getMainLooper())
@@ -52,6 +56,19 @@ class MainActivity : AppCompatActivity() {
     private lateinit var addressList: TextView
     private lateinit var peerList: ListView
     private lateinit var manualIp: EditText
+    private lateinit var batteryBox: View
+    private lateinit var batteryButton: Button
+    private lateinit var pinText: TextView
+    private lateinit var pinHint: TextView
+    private lateinit var newPinButton: Button
+    private lateinit var revokeButton: Button
+    private lateinit var pairBox: View
+    private lateinit var pinInput: EditText
+    private lateinit var pairButton: Button
+    private lateinit var micSwitch: CheckBox
+    private lateinit var micMeterRow: View
+    private lateinit var micLabel: TextView
+    private lateinit var micMeter: ProgressBar
     private lateinit var scanButton: Button
     private lateinit var clearButton: Button
     private lateinit var startButton: Button
@@ -81,9 +98,9 @@ class MainActivity : AppCompatActivity() {
                 return@registerForActivityResult
             }
             // Remember it, so the next run is one tap.
-            settings.lastHost = host.first
-            settings.lastPort = host.second
-            settings.lastName = selectedPeer?.hostname
+            settings.pushRecent(
+                Recent(host.first, host.second, selectedPeer?.hostname ?: "")
+            )
 
             val intent = Intent(this, StreamService::class.java)
                 .setAction(StreamService.ACTION_START_SENDER)
@@ -97,6 +114,20 @@ class MainActivity : AppCompatActivity() {
 
     private val notificationLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    /**
+     * The microphone switch is only honoured once the permission is
+     * granted, and the box unticks itself if it is refused: a switch that
+     * looks on while nothing is captured would be worse than no switch.
+     */
+    private val micPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (!granted) {
+                micSwitch.isChecked = false
+                settings.micEnabled = false
+                StreamStats.errorText = getString(R.string.mic_denied)
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -159,6 +190,19 @@ class MainActivity : AppCompatActivity() {
         addressList = findViewById(R.id.addressList)
         peerList = findViewById(R.id.peerList)
         manualIp = findViewById(R.id.manualIp)
+        batteryBox = findViewById(R.id.batteryBox)
+        batteryButton = findViewById(R.id.batteryButton)
+        pinText = findViewById(R.id.pinText)
+        pinHint = findViewById(R.id.pinHint)
+        newPinButton = findViewById(R.id.newPinButton)
+        revokeButton = findViewById(R.id.revokeButton)
+        pairBox = findViewById(R.id.pairBox)
+        pinInput = findViewById(R.id.pinInput)
+        pairButton = findViewById(R.id.pairButton)
+        micSwitch = findViewById(R.id.micSwitch)
+        micMeterRow = findViewById(R.id.micMeterRow)
+        micLabel = findViewById(R.id.micLabel)
+        micMeter = findViewById(R.id.micMeter)
         scanButton = findViewById(R.id.scanButton)
         clearButton = findViewById(R.id.clearButton)
         startButton = findViewById(R.id.startButton)
@@ -186,6 +230,26 @@ class MainActivity : AppCompatActivity() {
             presetHint.text = preset.hint
             settings.preset = preset
         }
+        micSwitch.isChecked = settings.micEnabled
+        micSwitch.setOnCheckedChangeListener { _, checked ->
+            settings.micEnabled = checked
+            if (checked &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
+        }
+        newPinButton.setOnClickListener {
+            val host = StreamService.sharedPairingHost
+            if (host.displayPin() == null) host.openWindow() else host.closeWindow()
+        }
+        revokeButton.setOnClickListener {
+            settings.clearPairings()
+            StreamStats.errorText = null
+        }
+        batteryButton.setOnClickListener { askToRunUnrestricted() }
+        pairButton.setOnClickListener { startPairing() }
         scanButton.setOnClickListener { discovery.scan() }
         clearButton.setOnClickListener { clearList() }
         startButton.setOnClickListener { onStartStop() }
@@ -198,12 +262,82 @@ class MainActivity : AppCompatActivity() {
                 Latency.BALANCED -> R.id.presetBalanced
             }
         )
-        settings.lastHost?.let { host ->
-            manualIp.setText(if (settings.lastPort == Config.AUDIO_PORT) host else "$host:${settings.lastPort}")
+        settings.mostRecent()?.let { entry ->
+            manualIp.setText(
+                if (entry.port == Config.AUDIO_PORT) entry.host else "${entry.host}:${entry.port}"
+            )
         }
 
         presetHint.text = preset.hint
         applyMode()
+    }
+
+    /**
+     * Asks Android to stop putting this app to sleep.
+     *
+     * A foreground service survives the screen going off, but Doze still
+     * defers its network traffic and vendor battery managers freeze it
+     * outright -- which is why the audio stops a minute after the phone is
+     * locked. Only the user can grant the exemption, so this opens the
+     * system dialog rather than pretending to fix it.
+     */
+    private fun askToRunUnrestricted() {
+        val intent = Intent(
+            android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+            android.net.Uri.parse("package:$packageName")
+        )
+        runCatching { startActivity(intent) }.onFailure {
+            // Some vendors hide that dialog; send them to the app's
+            // settings page, where the same switch lives.
+            runCatching {
+                startActivity(
+                    Intent(
+                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        android.net.Uri.parse("package:$packageName")
+                    )
+                )
+            }
+        }
+    }
+
+    /**
+     * Proves to the chosen PC that we know the PIN on its screen, and
+     * keeps the token it hands back. Runs off the main thread: it waits
+     * on the network.
+     */
+    private fun startPairing() {
+        val target = targetHost()
+        if (target == null) {
+            StreamStats.errorText = "Choose a PC first."
+            return
+        }
+        val pin = Pin.parse(pinInput.text?.toString().orEmpty())
+        if (pin == null) {
+            StreamStats.errorText = "The PIN is six digits."
+            return
+        }
+        pairButton.isEnabled = false
+        StreamStats.errorText = null
+        Thread({
+            val result = runCatching {
+                PairClient.pairWith(java.net.InetAddress.getByName(target.first), pin)
+            }.getOrElse { PairClient.Result.Failed(it.message ?: "Pairing failed.") }
+            ui.post {
+                pairButton.isEnabled = true
+                when (result) {
+                    is PairClient.Result.Paired -> {
+                        settings.addPairing(target.first, result.hostname, result.token)
+                        settings.pushRecent(
+                            Recent(target.first, target.second, result.hostname)
+                        )
+                        pinInput.setText("")
+                        StreamStats.errorText = null
+                    }
+                    is PairClient.Result.Failed ->
+                        StreamStats.errorText = result.message
+                }
+            }
+        }, "audiopush-pair").apply { isDaemon = true }.start()
     }
 
     /**
@@ -215,6 +349,8 @@ class MainActivity : AppCompatActivity() {
         discovery.clear()
         settings.forgetTarget()
         selectedPeer = null
+        selectedRecent = null
+        shownTargets = emptyList()
         peerList.clearChoices()
         peerAdapter.clear()
         peerAdapter.notifyDataSetChanged()
@@ -237,9 +373,13 @@ class MainActivity : AppCompatActivity() {
         }
         when (mode) {
             Mode.RECEIVE -> {
+                val micWanted = micSwitch.isChecked &&
+                    ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+                    PackageManager.PERMISSION_GRANTED
                 val intent = Intent(this, StreamService::class.java)
                     .setAction(StreamService.ACTION_START_RECEIVER)
                     .putExtra(StreamService.EXTRA_PRESET, preset.ordinal)
+                    .putExtra(StreamService.EXTRA_MIC, micWanted)
                 ContextCompat.startForegroundService(this, intent)
             }
             Mode.SEND -> {
@@ -248,8 +388,14 @@ class MainActivity : AppCompatActivity() {
                         "Capturing this phone's audio needs Android 10 or newer."
                     return
                 }
-                if (targetHost() == null) {
+                val chosen = targetHost()
+                if (chosen == null) {
                     StreamStats.errorText = "Choose a PC to send to first."
+                    return
+                }
+                if (settings.tokenFor(chosen.first) == null) {
+                    StreamStats.errorText =
+                        "Pair with this PC first: type the PIN it shows."
                     return
                 }
                 val manager =
@@ -262,6 +408,7 @@ class MainActivity : AppCompatActivity() {
     /** The PC to stream to: the selected peer, or a typed address. */
     private fun targetHost(): Pair<String, Int>? {
         selectedPeer?.let { return Pair(it.address.hostAddress ?: return null, it.port) }
+        selectedRecent?.let { return Pair(it.host, it.port) }
         val typed = manualIp.text?.toString()?.trim().orEmpty()
         if (typed.isEmpty()) return null
         val host = typed.substringBefore(':')
@@ -294,7 +441,13 @@ class MainActivity : AppCompatActivity() {
             }
         } else {
             val peers = discovery.livePeers()
-            val labels = peers.map { "${it.hostname}  —  ${it.address.hostAddress}" }
+            // Live receivers first, then ones used before that are not
+            // announcing right now: usually they are simply not started
+            // yet, and streaming to one works the moment it is.
+            val liveHosts = peers.mapNotNull { it.address.hostAddress }.toSet()
+            val saved = settings.recent.filterNot { it.host in liveHosts }
+            val labels = peers.map { "${it.hostname}  —  ${it.address.hostAddress}" } +
+                saved.map { "${it.label()}   (recent)" }
             if (labels != (0 until peerAdapter.count).map { peerAdapter.getItem(it) }) {
                 peerAdapter.clear()
                 peerAdapter.addAll(labels)
@@ -302,6 +455,11 @@ class MainActivity : AppCompatActivity() {
             }
             val checked = peerList.checkedItemPosition
             selectedPeer = peers.getOrNull(checked)
+            selectedRecent = if (checked >= peers.size) {
+                saved.getOrNull(checked - peers.size)
+            } else {
+                null
+            }
         }
 
         val live = StreamStats.streamLive()
@@ -341,6 +499,51 @@ class MainActivity : AppCompatActivity() {
             }
         } else {
             "Idle"
+        }
+
+        // Nag until the app is allowed to run with the screen off. This is
+        // the single most common reason a stream dies on a locked phone.
+        batteryBox.visibility =
+            if (WifiLocks.batteryOptimised(this)) View.VISIBLE else View.GONE
+
+        // Pairing. The PIN only means anything while the receiver is
+        // running, because only then is anything listening to answer it.
+        if (mode == Mode.RECEIVE) {
+            val host = StreamService.sharedPairingHost
+            val shownPin = host.displayPin()
+            val locked = host.lockedSecondsLeft()
+            pinText.text = shownPin ?: ""
+            pinText.visibility = if (shownPin == null) View.GONE else View.VISIBLE
+            newPinButton.text = getString(
+                if (shownPin == null) R.string.pair_new_device else R.string.cancel
+            )
+            pinHint.text = when {
+                locked > 0L -> getString(R.string.pin_locked, locked)
+                shownPin != null -> getString(R.string.pin_open, host.windowSecondsLeft())
+                running -> getString(R.string.pin_hint)
+                else -> getString(R.string.pin_hint_started)
+            }
+            val paired = settings.pairings.size
+            revokeButton.visibility = if (paired > 0) View.VISIBLE else View.GONE
+            revokeButton.text = getString(R.string.revoke_all) + " ($paired)"
+        } else {
+            // Only ask for a PIN when the chosen PC is actually unpaired.
+            val chosen = targetHost()
+            val needsPairing = chosen != null && settings.tokenFor(chosen.first) == null
+            pairBox.visibility = if (needsPairing && !running) View.VISIBLE else View.GONE
+        }
+
+        // The microphone meter only appears while it is actually capturing,
+        // so an idle switch never looks like a live microphone.
+        val micLive = MicStats.running.get() && mode == Mode.RECEIVE
+        micMeterRow.visibility = if (micLive) View.VISIBLE else View.GONE
+        micSwitch.isEnabled = !running
+        if (micLive) {
+            micMeter.progress =
+                (kotlin.math.sqrt(MicStats.level().coerceIn(0f, 1f)) * 100).toInt()
+            // Naming the destination is what stops a hijack being silent.
+            val destination = MicStats.targetText
+            micLabel.text = if (destination == null) "Mic (waiting)" else "Mic -> $destination"
         }
 
         // Where playback is actually going. Worth showing: "the meter moves

@@ -28,8 +28,35 @@ const BLOCK_DURATION: Duration =
 /// It has to be comfortably longer than the WASAPI engine period (~10 ms).
 const SILENCE_AFTER: Duration = Duration::from_millis(30);
 
+/// What the capture thread is listening to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    /// WASAPI loopback on a render endpoint: whatever Windows is playing.
+    SystemAudio,
+    /// A real capture endpoint: a microphone or line input.
+    Microphone,
+}
+
+impl Source {
+    /// Which kind of endpoint the device id refers to.
+    fn device_direction(&self) -> Direction {
+        match self {
+            Source::SystemAudio => Direction::Render,
+            Source::Microphone => Direction::Capture,
+        }
+    }
+
+    fn describe(&self) -> &'static str {
+        match self {
+            Source::SystemAudio => "output device to capture",
+            Source::Microphone => "microphone",
+        }
+    }
+}
+
 pub fn spawn(
     device_id: Option<String>,
+    source: Source,
     preset: Latency,
     ring: Arc<BlockRing>,
     shared: Arc<Shared>,
@@ -46,7 +73,7 @@ pub fn spawn(
             // Outer loop: reopen the device after any failure, which is also
             // how a default-device change or an unplugged endpoint recovers.
             while !stop.load(Ordering::Relaxed) {
-                match capture_once(device_id.as_deref(), preset, &ring, &shared, &stop) {
+                match capture_once(device_id.as_deref(), source, preset, &ring, &shared, &stop) {
                     Ok(()) => {}
                     Err(err) => {
                         shared.audio_running.store(false, Ordering::Relaxed);
@@ -68,20 +95,23 @@ pub fn spawn(
 
 fn capture_once(
     device_id: Option<&str>,
+    source: Source,
     preset: Latency,
     ring: &BlockRing,
     shared: &Shared,
     stop: &AtomicBool,
 ) -> Result<(), String> {
     let enumerator = DeviceEnumerator::new().map_err(|e| e.to_string())?;
-    // Loopback captures from a *render* endpoint.
-    let device = devices::resolve(&enumerator, device_id, Direction::Render)
-        .map_err(|e| format!("no output device to capture: {e}"))?;
+    // Loopback reads from a *render* endpoint; a microphone is an ordinary
+    // capture endpoint. The wasapi crate turns the first combination into
+    // AUDCLNT_STREAMFLAGS_LOOPBACK on its own.
+    let device = devices::resolve(&enumerator, device_id, source.device_direction())
+        .map_err(|e| format!("no {}: {e}", source.describe()))?;
     let device_name = device.get_friendlyname().unwrap_or_default();
     let open_id = device.get_id().ok();
 
     let (client, event, blockalign) = open_client(&device, Direction::Capture, preset)
-        .map_err(|e| format!("could not open loopback capture: {e}"))?;
+        .map_err(|e| format!("could not open {}: {e}", source.describe()))?;
     let capture_client = client
         .get_audiocaptureclient()
         .map_err(|e| format!("could not get capture client: {e}"))?;
@@ -178,7 +208,7 @@ fn capture_once(
         // Cheap periodic check: did Windows switch the default output on us?
         if device_id.is_none() && device_check.elapsed() > Duration::from_secs(1) {
             device_check = Instant::now();
-            if let Ok(current) = enumerator.get_default_device(Direction::Render) {
+            if let Ok(current) = enumerator.get_default_device(source.device_direction()) {
                 if let Ok(current_id) = current.get_id() {
                     if open_id.as_deref() != Some(current_id.as_str()) {
                         // Reopen against the new default.

@@ -25,6 +25,8 @@ pub const BLOCK_MS: f32 = (FRAMES_PER_BLOCK as f32) * 1000.0 / (SAMPLE_RATE as f
 pub const AUDIO_PORT: u16 = 45778;
 /// UDP port used for broadcast announcements and scan probes.
 pub const DISCOVERY_PORT: u16 = 45777;
+/// UDP port carrying the return microphone stream, receiver back to sender.
+pub const MIC_PORT: u16 = 45779;
 
 /// Capacity (in blocks) of each lock-free ring. Must be a power of two.
 /// 512 blocks = 2.5 s; it is only a safety margin, the pipeline actively keeps

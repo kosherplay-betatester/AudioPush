@@ -1,6 +1,7 @@
 //! UDP transport and peer discovery.
 
 pub mod discovery;
+pub mod pair;
 pub mod protocol;
 pub mod receiver;
 pub mod scan;

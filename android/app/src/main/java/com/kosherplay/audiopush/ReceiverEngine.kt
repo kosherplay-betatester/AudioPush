@@ -25,7 +25,14 @@ import java.util.concurrent.atomic.AtomicBoolean
  * structural difference is that `AudioTrack.write` blocks, so it paces the
  * loop in place of a buffer-ready event.
  */
-class ReceiverEngine(private val context: Context, private val preset: Latency) {
+class ReceiverEngine(
+    private val context: Context,
+    private val preset: Latency,
+    /** Every pairing this device will accept audio from. */
+    private val tokens: TokenStore,
+    /** Filled in so the return microphone stream knows where to send. */
+    private val micTarget: PeerTarget? = null
+) {
     private val stop = AtomicBoolean(false)
 
     /** Set when the output devices change, so the track is reopened. */
@@ -78,6 +85,7 @@ class ReceiverEngine(private val context: Context, private val preset: Latency) 
             val block = ShortArray(Config.BLOCK_SAMPLES)
             var expectedSeq: Int? = null
             var peer: String? = null
+            var unauthorised = 0L
 
             while (!stop.get()) {
                 val packet = DatagramPacket(buffer, buffer.size)
@@ -87,7 +95,28 @@ class ReceiverEngine(private val context: Context, private val preset: Latency) 
                     continue // timeout; re-check the stop flag
                 }
 
-                val seq = Protocol.decodeAudioSeq(packet.data, packet.length) ?: continue
+                val header = Protocol.decodeAudioHeader(
+                    packet.data, packet.length, Protocol.MAGIC
+                ) ?: continue
+                val (seq, keyId) = header
+
+                // Authenticate before anything else looks at the packet.
+                // Without this an unpaired machine on the network could
+                // play audio through these speakers and, far worse,
+                // become the destination of this phone's microphone.
+                val token = tokens.find(keyId)
+                if (token == null || !Protocol.verifyAudio(
+                        packet.data, packet.length, token
+                    )
+                ) {
+                    unauthorised++
+                    if (unauthorised == 1L || unauthorised % 500L == 0L) {
+                        StreamStats.errorText =
+                            "Ignoring audio from an unpaired PC " +
+                            "(${packet.address.hostAddress}). Pair it to allow it."
+                    }
+                    continue
+                }
 
                 expectedSeq?.let { expected ->
                     val gap = seq - expected
@@ -101,6 +130,24 @@ class ReceiverEngine(private val context: Context, private val preset: Latency) 
                 if (peer != peerText) {
                     peer = peerText
                     StreamStats.peerText = peerText
+                    // Point the return microphone stream at whoever started
+                    // streaming to us -- once, and only once.
+                    //
+                    // Following the peer here would be an eavesdropping hole:
+                    // anyone on the network could send a single packet to the
+                    // audio port and this phone would redirect its live
+                    // microphone to them, silently. The destination is latched
+                    // for the session instead, and shown in the UI, so a later
+                    // arrival cannot steal the microphone. Stopping and
+                    // starting the stream is what re-pairs it.
+                    micTarget?.let { target ->
+                        if (target.address == null) {
+                            target.address = packet.address
+                            // Sign the microphone with the same pairing
+                            // this sender authenticated with.
+                            target.token = token
+                        }
+                    }
                 }
 
                 Protocol.payloadIntoBlock(packet.data, block)

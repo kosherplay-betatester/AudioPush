@@ -14,14 +14,31 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::config::{ANNOUNCE_INTERVAL_MS, DISCOVERY_PORT, PEER_TIMEOUT_MS};
+use crate::net::pair::{PairOutcome, PairingHost};
 use crate::net::protocol::{
     DISCOVERY_MAX, DiscoveryMessage, decode_discovery, encode_announce,
 };
+use crate::pairing::{Token, TokenStore};
 use crate::net::{hostname, local_addresses};
 use crate::state::{Peer, now_ms};
+use std::net::IpAddr;
 
 /// Shared, GUI-readable list of receivers we have heard from.
 pub type PeerList = Arc<Mutex<Vec<Peer>>>;
+
+/// A sender that has just paired with this receiver. The GUI drains these
+/// and writes them to settings, so the pairing survives a restart.
+#[derive(Clone, Debug)]
+pub struct NewPairing {
+    pub peer: IpAddr,
+    pub token: Token,
+}
+
+pub type PairingQueue = Arc<Mutex<Vec<NewPairing>>>;
+
+pub fn new_pairing_queue() -> PairingQueue {
+    Arc::new(Mutex::new(Vec::new()))
+}
 
 pub fn new_peer_list() -> PeerList {
     Arc::new(Mutex::new(Vec::new()))
@@ -46,7 +63,13 @@ fn bind_discovery() -> Result<UdpSocket, String> {
 // ---------------------------------------------------------------------------
 
 /// Starts announcing this machine as an available receiver.
-pub fn start_announcer(audio_port: u16, stop: Arc<AtomicBool>) -> Result<JoinHandle<()>, String> {
+pub fn start_announcer(
+    audio_port: u16,
+    stop: Arc<AtomicBool>,
+    host: Arc<PairingHost>,
+    tokens: Arc<TokenStore>,
+    queue: PairingQueue,
+) -> Result<JoinHandle<()>, String> {
     let socket = bind_discovery()?;
     let name = hostname();
 
@@ -64,10 +87,32 @@ pub fn start_announcer(audio_port: u16, stop: Arc<AtomicBool>) -> Result<JoinHan
                     broadcast(&socket, &payload);
                 }
 
-                // Answer scan probes straight away, so a scan feels instant.
                 if let Ok((len, from)) = socket.recv_from(&mut buf) {
-                    if let Some(DiscoveryMessage::Probe) = decode_discovery(&buf[..len]) {
-                        let _ = socket.send_to(&payload, from);
+                    match decode_discovery(&buf[..len]) {
+                        // Answer scan probes straight away, so a scan
+                        // feels instant.
+                        Some(DiscoveryMessage::Probe) => {
+                            let _ = socket.send_to(&payload, from);
+                        }
+                        // A sender proving it knows the PIN on screen.
+                        Some(DiscoveryMessage::PairRequest { nonce, proof }) => {
+                            let outcome = host.handle_request(&nonce, &proof);
+                            let reply = host.reply(&outcome, &nonce, &name);
+                            let _ = socket.send_to(&reply, from);
+                            if let PairOutcome::Paired { token } = outcome {
+                                // Trust it immediately, so the sender can
+                                // start streaming without a restart, and
+                                // hand it to the GUI to persist.
+                                tokens.add(token.clone());
+                                if let Ok(mut queue) = queue.lock() {
+                                    queue.push(NewPairing {
+                                        peer: from.ip(),
+                                        token,
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }

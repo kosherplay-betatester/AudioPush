@@ -309,3 +309,25 @@ network you trust: anyone already on it can send audio to your speakers, and
 could in principle win the race to be the first peer of a microphone session
 if they knew to try at the exact moment you pressed Start. If that matters
 for your network, leave the microphone switch off and use a USB microphone.
+
+## "Windows protected your PC"
+
+Windows tags every file you download with its origin, and SmartScreen blocks
+unrecognised programs carrying that tag. It is about the download, not the
+contents: the same file built on your own machine starts without a word.
+
+Clear the tag once and the warning is gone for good:
+
+```powershell
+Unblock-File "$env:USERPROFILE\Downloads\AudioPush-*.exe"
+```
+
+A signature would avoid it altogether, but only one from an authority every
+Windows machine already trusts — a certificate you make yourself works only
+on machines where you installed it. AudioPush is applying to [SignPath
+Foundation](https://signpath.org), which issues such certificates to
+open-source projects for free; see [docs/CODE_SIGNING_POLICY.md](docs/CODE_SIGNING_POLICY.md).
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

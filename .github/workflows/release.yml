@@ -1,0 +1,65 @@
+# Builds the Windows binary on GitHub's runners.
+#
+# SignPath will only sign artifacts whose provenance it can check, which
+# means a build it can trace to a commit on a trusted CI system. A binary
+# built on a laptop cannot be signed, however trustworthy the laptop is, so
+# the release build lives here rather than on a developer machine.
+#
+# The signing step is skipped until the SignPath secrets exist, so this
+# workflow is useful on its own: it produces the same executable, just
+# unsigned.
+name: Release build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Stage the executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifact | Out-Null
+          Copy-Item target\release\audiopush.exe artifact\
+
+      - name: Upload the unsigned build
+        id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: audiopush-windows-unsigned
+          path: artifact
+
+      # Signing is free for open-source projects, and the Foundation issues
+      # the certificate in its own name, so nothing here holds a private key.
+      # Pinned to a commit, not a tag. A tag is a movable label: whoever
+      # controls the action's repository can repoint it at other code, and
+      # that code would run here with the signing token in reach.
+      - name: Sign with SignPath
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: audiopush
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Upload the signed build
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: audiopush-windows-signed
+          path: signed

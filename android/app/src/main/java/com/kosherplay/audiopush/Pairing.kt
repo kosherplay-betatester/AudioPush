@@ -228,24 +228,27 @@ class PairingHost {
             return Outcome.Refused(Protocol.REJECT_WRONG_PIN)
         }
 
+        // The reply must prove the receiver knew the PIN too, so a machine
+        // impersonating the receiver cannot plant a token of its own. Sign it
+        // here, while the PIN the sender read off the screen is still the one
+        // we hold.
+        val token = Token.random()
+        val acceptProof = pin.proof(nonce + token.bytes)
+
         // Success closes the window and burns the PIN, so one PIN pairs one
         // device. Anyone who overheard it has nothing left to use.
         attempts = 0
         windowUntilMs = 0L
         pin = Pin.random()
-        return Outcome.Paired(Token.random())
+        return Outcome.Paired(token, acceptProof)
     }
 
-    /**
-     * Proof that the receiver knew the PIN too, so a machine impersonating
-     * the receiver cannot hand out a token of its own choosing.
-     */
-    @Synchronized
-    fun acceptProof(nonce: ByteArray, token: Token): ByteArray =
-        pin.proof(nonce + token.bytes)
-
     sealed class Outcome {
-        data class Paired(val token: Token) : Outcome()
+        /**
+         * The proof travels with the token because success burns the PIN, and
+         * the reply has to be signed with the PIN the sender actually saw.
+         */
+        data class Paired(val token: Token, val acceptProof: ByteArray) : Outcome()
         data class Refused(val reason: Byte) : Outcome()
     }
 

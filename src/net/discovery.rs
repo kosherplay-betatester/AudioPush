@@ -97,9 +97,9 @@ pub fn start_announcer(
                         // A sender proving it knows the PIN on screen.
                         Some(DiscoveryMessage::PairRequest { nonce, proof }) => {
                             let outcome = host.handle_request(&nonce, &proof);
-                            let reply = host.reply(&outcome, &nonce, &name);
+                            let reply = host.reply(&outcome, &name);
                             let _ = socket.send_to(&reply, from);
-                            if let PairOutcome::Paired { token } = outcome {
+                            if let PairOutcome::Paired { token, .. } = outcome {
                                 // Trust it immediately, so the sender can
                                 // start streaming without a restart, and
                                 // hand it to the GUI to persist.

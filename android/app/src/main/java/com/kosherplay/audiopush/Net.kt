@@ -240,7 +240,7 @@ class Announcer(
                                     Protocol.encodePairAccept(
                                         outcome.token,
                                         Net.deviceName(),
-                                        host.acceptProof(message.nonce, outcome.token)
+                                        outcome.acceptProof
                                     )
                                 }
                                 is PairingHost.Outcome.Refused ->

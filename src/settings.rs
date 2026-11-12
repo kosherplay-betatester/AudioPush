@@ -24,11 +24,15 @@ pub struct Recent {
 
 impl Recent {
     /// What to show in the list.
+    ///
+    /// The port is shown as well as the address. It is almost always the
+    /// default, but an entry typed by hand can carry another one, and a list
+    /// that hides it looks like it forgot.
     pub fn label(&self) -> String {
         if self.name.is_empty() {
-            self.addr.ip().to_string()
+            self.addr.to_string()
         } else {
-            format!("{}  —  {}", self.name, self.addr.ip())
+            format!("{}  —  {}", self.name, self.addr)
         }
     }
 }

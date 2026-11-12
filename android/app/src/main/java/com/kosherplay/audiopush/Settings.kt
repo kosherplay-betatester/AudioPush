@@ -4,7 +4,13 @@ import android.content.Context
 
 /** A PC streamed to before. */
 data class Recent(val host: String, val port: Int, val name: String) {
-    fun label(): String = if (name.isBlank()) host else "$name  —  $host"
+    /**
+     * The port is shown as well as the address. It is almost always the
+     * default, but an entry typed by hand can carry another one, and a list
+     * that hides it looks like it forgot.
+     */
+    fun label(): String =
+        if (name.isBlank()) "$host:$port" else "$name  —  $host:$port"
 
     fun serialise(): String = "${name.replace('|', ' ')}|$host|$port"
 

@@ -65,7 +65,13 @@ struct HostState {
 /// What a pairing attempt produced, for the UI to report.
 pub enum PairOutcome {
     /// A new sender was paired; the token must be stored and trusted.
-    Paired { token: Token },
+    ///
+    /// The proof travels with the token because success burns the PIN, and
+    /// the reply has to be signed with the PIN the sender actually saw.
+    Paired {
+        token: Token,
+        accept_proof: [u8; 32],
+    },
     Refused(PairReject),
 }
 
@@ -180,33 +186,35 @@ impl PairingHost {
             return PairOutcome::Refused(PairReject::WrongPin);
         }
 
+        // The reply must prove the receiver knew the PIN too, so a machine
+        // impersonating the receiver cannot plant a token of its own. Sign it
+        // here, while the PIN the sender read off the screen is still the one
+        // we hold.
+        let token = Token::random();
+        let mut context = Vec::with_capacity(16 + 32);
+        context.extend_from_slice(nonce);
+        context.extend_from_slice(token.as_bytes());
+        let accept_proof = state.pin.proof(&context);
+
         // Success closes the window and burns the PIN, so one PIN pairs one
         // device. Anyone who overheard it has nothing left to use.
         state.attempts = 0;
         state.window_until = None;
         state.pin = Pin::random();
         PairOutcome::Paired {
-            token: Token::random(),
+            token,
+            accept_proof,
         }
     }
 
     /// Builds the reply to send back. Separated from [`Self::handle_request`]
     /// so the socket code stays in one place.
-    pub fn reply(&self, outcome: &PairOutcome, nonce: &[u8; 16], hostname: &str) -> Vec<u8> {
+    pub fn reply(&self, outcome: &PairOutcome, hostname: &str) -> Vec<u8> {
         match outcome {
-            PairOutcome::Paired { token } => {
-                // Proof that the receiver knew the PIN too, so a machine
-                // impersonating the receiver cannot hand out a token of its
-                // own choosing.
-                let Ok(state) = self.state.lock() else {
-                    return encode_pair_reject(PairReject::WrongPin);
-                };
-                let mut context = Vec::with_capacity(16 + 32);
-                context.extend_from_slice(nonce);
-                context.extend_from_slice(token.as_bytes());
-                let proof = state.pin.proof(&context);
-                encode_pair_accept(token, hostname, &proof)
-            }
+            PairOutcome::Paired {
+                token,
+                accept_proof,
+            } => encode_pair_accept(token, hostname, accept_proof),
             PairOutcome::Refused(reason) => encode_pair_reject(*reason),
         }
     }
@@ -280,6 +288,34 @@ mod tests {
         let nonce = random_nonce();
         let proof = pin.proof(&nonce);
         host.handle_request(&nonce, &proof)
+    }
+
+    /// The reply has to prove the receiver knew the PIN as well, or the
+    /// sender refuses it. This is the whole exchange, end to end: the PIN is
+    /// burned on success, so the proof must be computed while it still
+    /// exists.
+    #[test]
+    fn the_accept_proves_the_receiver_knew_the_pin() {
+        let host = PairingHost::new();
+        host.open_window();
+        let pin = shown_pin(&host);
+
+        let nonce = random_nonce();
+        let outcome = host.handle_request(&nonce, &pin.proof(&nonce));
+        let reply = host.reply(&outcome, "receiver");
+
+        let Some(DiscoveryMessage::PairAccept { token, proof, .. }) = decode_discovery(&reply)
+        else {
+            panic!("a correct PIN should be accepted");
+        };
+
+        let mut context = Vec::with_capacity(16 + 32);
+        context.extend_from_slice(&nonce);
+        context.extend_from_slice(token.as_bytes());
+        assert!(
+            pin.verify_proof(&context, &proof),
+            "the sender would reject this reply as coming from an impostor"
+        );
     }
 
     #[test]

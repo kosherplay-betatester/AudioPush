@@ -70,6 +70,41 @@ fn field(body: &str, name: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// Opens the release page in the default browser.
+///
+/// The URL comes out of a reply from the network, so it is checked against
+/// the one place it is allowed to point before anything is done with it, and
+/// it is handed to the shell's open verb rather than to a command
+/// interpreter. Through `cmd /C start` a reply containing `&` would run
+/// whatever followed it.
+pub fn open_release_page(url: &str) -> bool {
+    const PREFIX: &str = "https://github.com/kosherplay-betatester/AudioPush/releases";
+    let safe = url.starts_with(PREFIX)
+        && url.len() < 300
+        && url
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-._~:/?#[]@!$'()*+,;=%".contains(c));
+    if !safe {
+        return false;
+    }
+
+    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: both pointers are null-terminated and outlive the call, which
+    // does not retain them.
+    let result = unsafe {
+        windows::Win32::UI::Shell::ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            windows::core::PCWSTR(wide.as_ptr()),
+            windows::core::PCWSTR::null(),
+            windows::core::PCWSTR::null(),
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW reports failure as a value of 32 or less.
+    result.0 as usize > 32
+}
+
 /// True when `other` is a later version than `ours`.
 ///
 /// Compares the numbers rather than the text, so 0.1.10 is correctly newer
@@ -101,6 +136,14 @@ mod tests {
         assert!(is_newer("1.0.0", "0.9.9"));
         assert!(!is_newer("0.1.3", "0.1.3"));
         assert!(!is_newer("0.1.2", "0.1.3"));
+    }
+
+    #[test]
+    fn only_this_project_s_release_pages_are_opened() {
+        // A reply that tried to carry a shell fragment, or point elsewhere.
+        assert!(!open_release_page("https://github.com/kosherplay-betatester/AudioPush/releases\" & calc"));
+        assert!(!open_release_page("https://example.com/releases"));
+        assert!(!open_release_page("file:///C:/Windows/System32/calc.exe"));
     }
 
     #[test]

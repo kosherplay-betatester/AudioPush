@@ -22,8 +22,6 @@ use crate::net::pair::{PairingHost, pair_with};
 use crate::net::scan::{self, ScanProgress};
 use crate::net::{LocalAddress, hostname, local_addresses};
 use crate::pairing::{Pin, Token, TokenStore};
-use std::os::windows::process::CommandExt;
-
 use crate::settings::{Pairing, Recent, Settings};
 use crate::state::{Peer, Shared, now_ms};
 use crate::update;
@@ -473,10 +471,7 @@ impl AudioPushApp {
             }
             if let Some(url) = self.update_url.clone() {
                 if ui.small_button("Open the release page").clicked() {
-                    let _ = std::process::Command::new("cmd")
-                        .args(["/C", "start", "", &url])
-                        .creation_flags(0x0800_0000)
-                        .spawn();
+                    update::open_release_page(&url);
                 }
             }
         });

@@ -1032,6 +1032,46 @@ impl AudioPushApp {
         into.is_some() && into == tapped
     }
 
+    /// Checks the cable the microphone is being played into.
+    ///
+    /// A virtual cable is two endpoints joined inside a driver. The sound
+    /// written to one half comes out of the other, and some cables copy it
+    /// across without converting anything -- so when the two halves disagree
+    /// about sample rate or channel count, everything through them plays at
+    /// the wrong speed. Steam's Streaming Microphone is 48 kHz stereo on the
+    /// playback side and 44.1 kHz mono on the recording side, which is 0.46x:
+    /// slow enough that speech recognition hears nothing it understands.
+    ///
+    /// Nothing on this side can correct for it -- the mismatch is inside the
+    /// driver, past anything we can reach -- so the only useful thing to do
+    /// is say so before the user spends an evening on it. Returns the
+    /// sentence to show, and how far off the speed would be.
+    fn cable_mismatch(&self) -> Option<(String, f32)> {
+        let chosen = self.resolved_output(&self.mic_output_device)?;
+        let out = self.output_devices.iter().find(|d| d.id == chosen)?;
+        let hardware = out.hardware()?;
+        // The other half of the same cable, if this is one at all.
+        let input = self
+            .input_devices
+            .iter()
+            .find(|d| d.hardware() == Some(hardware))?;
+        if out.rate == 0 || input.rate == 0 || out.channels == 0 || input.channels == 0 {
+            return None;
+        }
+        let speed = (input.rate as f32 / out.rate as f32)
+            * (input.channels as f32 / out.channels as f32);
+        if (0.98..1.02).contains(&speed) {
+            return None;
+        }
+        Some((
+            format!(
+                "\"{hardware}\" plays at {} Hz / {} ch but records at {} Hz / {} ch.",
+                out.rate, out.channels, input.rate, input.channels
+            ),
+            speed,
+        ))
+    }
+
     fn mic_ui(&mut self, ui: &mut egui::Ui, is_sender: bool) {
         ui.add_space(12.0);
         let streaming = self.streaming();
@@ -1104,6 +1144,23 @@ impl AudioPushApp {
                     });
             });
         });
+
+        if is_sender {
+            if let Some((what, speed)) = self.cable_mismatch() {
+                ui.add_space(4.0);
+                ui.colored_label(
+                    egui::Color32::from_rgb(235, 110, 100),
+                    format!("This cable would play the voice at {speed:.2}x speed."),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{what} It copies sound between its two halves without                          converting it, so what comes out is at the wrong speed and                          dictation will not understand a word. Nothing here can                          correct it. Use a cable whose halves agree -- VB-CABLE is                          the usual one."
+                    ))
+                    .color(egui::Color32::GRAY)
+                    .small(),
+                );
+            }
+        }
 
         if is_sender && self.mic_feeds_back() {
             ui.add_space(4.0);

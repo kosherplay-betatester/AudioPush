@@ -229,6 +229,40 @@ mod tests {
     use super::*;
     use wasapi::DeviceEnumerator;
 
+    /// Prints the format of every endpoint, both directions.
+    ///
+    /// A virtual cable is two endpoints joined inside a driver. When the two
+    /// halves disagree about rate or channel count, and the driver copies
+    /// between them without converting, everything through it comes out at
+    /// the wrong speed -- so the two lines for one cable are what to compare.
+    #[test]
+    #[ignore]
+    fn print_every_endpoint_format() {
+        wasapi::initialize_mta().ok();
+        let enumerator = DeviceEnumerator::new().unwrap();
+        for direction in [Direction::Render, Direction::Capture] {
+            let collection = enumerator.get_device_collection(direction).unwrap();
+            for i in 0..collection.get_nbr_devices().unwrap() {
+                let Ok(device) = collection.get_device_at_index(i) else {
+                    continue;
+                };
+                let name = device.get_friendlyname().unwrap_or_default();
+                let Ok(client) = device.get_iaudioclient() else {
+                    continue;
+                };
+                let Ok(mix) = client.get_mixformat() else {
+                    continue;
+                };
+                println!(
+                    "{direction:?}  {:>6} Hz  {} ch  {:>2} bit   {name}",
+                    mix.get_samplespersec(),
+                    mix.get_nchannels(),
+                    mix.get_bitspersample(),
+                );
+            }
+        }
+    }
+
     /// Measures whether a virtual audio cable changes the pitch of what
     /// passes through it.
     ///

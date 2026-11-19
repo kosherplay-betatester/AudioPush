@@ -12,6 +12,27 @@ pub struct DeviceInfo {
     pub name: String,
     /// True for the current Windows default endpoint.
     pub is_default: bool,
+    /// The endpoint's own sample rate and channel count.
+    ///
+    /// Carried because a virtual cable is two endpoints joined inside a
+    /// driver, and when its two halves disagree about these, audio comes out
+    /// of the far side at the wrong speed. Comparing them is the only way to
+    /// catch that before the user hears it.
+    pub rate: u32,
+    pub channels: u16,
+}
+
+impl DeviceInfo {
+    /// The part of the name that identifies the hardware rather than the
+    /// jack: "Speakers (VB-Audio Virtual Cable)" -> "VB-Audio Virtual Cable".
+    ///
+    /// Both halves of a cable carry the same one, which is what lets the two
+    /// be matched up.
+    pub fn hardware(&self) -> Option<&str> {
+        let open = self.name.rfind('(')? + 1;
+        let close = self.name.rfind(')')?;
+        (close > open).then(|| self.name[open..close].trim())
+    }
 }
 
 /// Lists active endpoints in one direction, default first.
@@ -38,10 +59,18 @@ pub fn list(direction: Direction) -> Result<Vec<DeviceInfo>, String> {
             .get_friendlyname()
             .unwrap_or_else(|_| "Unknown device".to_string());
         let is_default = default_id.as_deref() == Some(id.as_str());
+        // An endpoint can refuse to describe itself; it is still listed.
+        let (rate, channels) = device
+            .get_iaudioclient()
+            .and_then(|client| client.get_mixformat())
+            .map(|mix| (mix.get_samplespersec(), mix.get_nchannels()))
+            .unwrap_or((0, 0));
         devices.push(DeviceInfo {
             id,
             name,
             is_default,
+            rate,
+            channels,
         });
     }
 

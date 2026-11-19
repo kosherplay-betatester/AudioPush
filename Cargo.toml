@@ -1,6 +1,6 @@
 [package]
 name = "audiopush"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Stream Windows system audio to another PC on the LAN with minimal latency"
 license = "MIT"
@@ -15,6 +15,7 @@ rand = "0.10.3"
 sha2 = "0.11.1"
 # Optional notification-area icon.
 tray-icon = "0.26.1"
+ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
 # Event-driven WASAPI loopback capture and render.
 wasapi = "0.27.0"
 # MMCSS "Pro Audio" registration and the 1 ms timer resolution.

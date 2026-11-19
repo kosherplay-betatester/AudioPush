@@ -233,6 +233,19 @@ impl Settings {
         self.save();
     }
 
+    /// Forgets one machine, so the next connection to it asks for a PIN
+    /// again.
+    ///
+    /// Revoking is one-sided: the other end keeps its own copy of the token
+    /// and has no way to learn that this one threw it away. Without this,
+    /// a machine whose peer had revoked was stuck -- it believed it was
+    /// paired, so it never offered to pair, and every packet it sent was
+    /// silently dropped at the far end.
+    pub fn remove_pairing(&mut self, ip: IpAddr) {
+        self.pairings.retain(|p| p.ip != ip);
+        self.save();
+    }
+
     /// Revokes every pairing. Both ends must pair again before anything flows.
     pub fn clear_pairings(&mut self) {
         self.pairings.clear();

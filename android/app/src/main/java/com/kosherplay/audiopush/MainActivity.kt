@@ -56,6 +56,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var addressList: TextView
     private lateinit var peerList: ListView
     private lateinit var manualIp: EditText
+    private lateinit var versionText: TextView
+    private lateinit var updateButton: Button
+    private var updateUrl: String? = null
     private lateinit var batteryBox: View
     private lateinit var batteryButton: Button
     private lateinit var pinText: TextView
@@ -190,6 +193,9 @@ class MainActivity : AppCompatActivity() {
         addressList = findViewById(R.id.addressList)
         peerList = findViewById(R.id.peerList)
         manualIp = findViewById(R.id.manualIp)
+        versionText = findViewById(R.id.versionText)
+        updateButton = findViewById(R.id.updateButton)
+        versionText.text = getString(R.string.update_current, BuildConfig.VERSION_NAME)
         batteryBox = findViewById(R.id.batteryBox)
         batteryButton = findViewById(R.id.batteryButton)
         pinText = findViewById(R.id.pinText)
@@ -249,6 +255,16 @@ class MainActivity : AppCompatActivity() {
             StreamStats.errorText = null
         }
         batteryButton.setOnClickListener { askToRunUnrestricted() }
+        updateButton.setOnClickListener { checkForUpdate() }
+        versionText.setOnClickListener {
+            // Only when a newer release was actually found; otherwise this
+            // line is just text and tapping it should do nothing.
+            updateUrl?.let { url ->
+                runCatching {
+                    startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+                }
+            }
+        }
         pairButton.setOnClickListener { startPairing() }
         scanButton.setOnClickListener { discovery.scan() }
         clearButton.setOnClickListener { clearList() }
@@ -270,6 +286,41 @@ class MainActivity : AppCompatActivity() {
 
         presetHint.text = preset.hint
         applyMode()
+    }
+
+    /**
+     * Asks GitHub whether there is a newer release.
+     *
+     * The only thing in this app that leaves your network, and it runs only
+     * on this button. Nothing is downloaded or installed: it tells you, and
+     * the link opens the release page in your browser, so what runs on this
+     * phone stays your decision.
+     */
+    private fun checkForUpdate() {
+        updateButton.isEnabled = false
+        updateUrl = null
+        versionText.text = getString(R.string.update_checking)
+        Thread {
+            val outcome = Updates.latest()
+            runOnUiThread {
+                updateButton.isEnabled = true
+                outcome.onSuccess { release ->
+                    if (Updates.isNewer(release.version, BuildConfig.VERSION_NAME)) {
+                        updateUrl = release.url
+                        versionText.text =
+                            getString(R.string.update_available, release.version)
+                    } else {
+                        versionText.text =
+                            getString(R.string.update_current, BuildConfig.VERSION_NAME)
+                    }
+                }.onFailure {
+                    versionText.text = getString(
+                        R.string.update_failed,
+                        it.message ?: "no connection"
+                    )
+                }
+            }
+        }.apply { isDaemon = true }.start()
     }
 
     /**

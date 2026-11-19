@@ -30,8 +30,8 @@ android {
         // is checked at runtime.
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.1.3"
+        versionCode = 5
+        versionName = "0.1.4"
     }
 
     signingConfigs {
@@ -47,6 +47,12 @@ android {
                 enableV2Signing = true
             }
         }
+    }
+
+    // The update check compares against the version this APK was built as,
+    // which BuildConfig is the only honest source of.
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {

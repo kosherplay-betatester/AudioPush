@@ -16,6 +16,7 @@ mod ring;
 mod settings;
 mod state;
 mod tray;
+mod update;
 
 use eframe::egui;
 

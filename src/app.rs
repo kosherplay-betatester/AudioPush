@@ -22,8 +22,11 @@ use crate::net::pair::{PairingHost, pair_with};
 use crate::net::scan::{self, ScanProgress};
 use crate::net::{LocalAddress, hostname, local_addresses};
 use crate::pairing::{Pin, Token, TokenStore};
+use std::os::windows::process::CommandExt;
+
 use crate::settings::{Pairing, Recent, Settings};
 use crate::state::{Peer, Shared, now_ms};
+use crate::update;
 use crate::tray::Tray;
 
 /// Which screen the user is on.
@@ -91,6 +94,12 @@ pub struct AudioPushApp {
     /// Result of a pairing attempt, filled in by its worker thread.
     pairing_result: Arc<Mutex<Option<Result<(Token, String), String>>>>,
     pairing_busy: bool,
+    /// Update check. Runs on its own thread so the GUI never waits on the
+    /// network, and only ever when the button is pressed.
+    update_busy: bool,
+    update_result: Arc<Mutex<Option<Result<update::Release, String>>>>,
+    update_status: Option<String>,
+    update_url: Option<String>,
     pairing_error: Option<String>,
 
     // Remembered between runs
@@ -148,6 +157,10 @@ impl AudioPushApp {
             pin_input: String::new(),
             pairing_result: Arc::new(Mutex::new(None)),
             pairing_busy: false,
+            update_busy: false,
+            update_result: Arc::new(Mutex::new(None)),
+            update_status: None,
+            update_url: None,
             pairing_error: None,
             settings,
             tray: None,
@@ -392,6 +405,81 @@ impl AudioPushApp {
             .color(egui::Color32::GRAY)
             .small(),
         );
+
+        self.update_ui(ui);
+    }
+
+    /// The update check, and the only thing here that leaves your network.
+    ///
+    /// It asks GitHub what the newest release is and compares it with this
+    /// build. Nothing is downloaded or installed: it tells you, and the link
+    /// opens the release page in your browser, so what runs on this machine
+    /// stays your decision.
+    fn update_ui(&mut self, ui: &mut egui::Ui) {
+        if self.update_busy {
+            let finished = self
+                .update_result
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take());
+            if let Some(outcome) = finished {
+                self.update_busy = false;
+                match outcome {
+                    Ok(release) => {
+                        if update::is_newer(&release.version, update::current()) {
+                            self.update_status =
+                                Some(format!("Version {} is available.", release.version));
+                            self.update_url = Some(release.url);
+                        } else {
+                            self.update_status = Some("This is the newest version.".to_string());
+                            self.update_url = None;
+                        }
+                    }
+                    Err(message) => {
+                        self.update_status = Some(message);
+                        self.update_url = None;
+                    }
+                }
+            }
+        }
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("Version {}", update::current()))
+                    .color(egui::Color32::GRAY)
+                    .small(),
+            );
+            if ui
+                .add_enabled(!self.update_busy, egui::Button::new("Check for updates").small())
+                .on_hover_text(
+                    "Asks GitHub what the newest release is. Nothing about this                      machine is sent, and nothing is installed.",
+                )
+                .clicked()
+            {
+                self.update_busy = true;
+                self.update_status = Some("Checking...".to_string());
+                self.update_url = None;
+                let slot = Arc::clone(&self.update_result);
+                std::thread::spawn(move || {
+                    let outcome = update::latest();
+                    if let Ok(mut slot) = slot.lock() {
+                        *slot = Some(outcome);
+                    }
+                });
+            }
+            if let Some(status) = &self.update_status {
+                ui.label(egui::RichText::new(status).small());
+            }
+            if let Some(url) = self.update_url.clone() {
+                if ui.small_button("Open the release page").clicked() {
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "start", "", &url])
+                        .creation_flags(0x0800_0000)
+                        .spawn();
+                }
+            }
+        });
     }
 
     fn sender_ui(&mut self, ui: &mut egui::Ui) {
@@ -695,6 +783,39 @@ impl AudioPushApp {
     fn pairing_ui(&mut self, ui: &mut egui::Ui) {
         let Some(target) = self.target else { return };
         if self.settings.token_for(target.ip()).is_some() {
+            // Revoking is one-sided: the receiver can throw its copy of the
+            // token away and this end has no way to hear about it. Saying
+            // nothing here left the sender stuck, certain it was paired while
+            // every packet it sent was dropped, with no way back to the PIN.
+            let name = self
+                .settings
+                .pairings
+                .iter()
+                .find(|p| p.ip == target.ip())
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    egui::Color32::from_rgb(120, 200, 150),
+                    if name.is_empty() {
+                        "Paired with this receiver".to_string()
+                    } else {
+                        format!("Paired with {name}")
+                    },
+                );
+                if ui
+                    .small_button("Pair again")
+                    .on_hover_text(
+                        "Use this if the receiver revoked its pairings. It forgets                          this one machine and asks for a new PIN.",
+                    )
+                    .clicked()
+                {
+                    self.settings.remove_pairing(target.ip());
+                    self.pairing_error = None;
+                    self.pin_input.clear();
+                }
+            });
             return;
         }
 
@@ -887,6 +1008,35 @@ impl AudioPushApp {
     /// On the receiver this is "lend my microphone to the workstation"; on
     /// the sender it is "where do I play the microphone that arrives". They
     /// are two halves of one switch, so they share a section.
+    /// The endpoint an output selection really means, resolving "follow
+    /// Windows" to whichever device that is right now.
+    fn resolved_output<'a>(&'a self, chosen: &'a Option<String>) -> Option<&'a str> {
+        match chosen {
+            Some(id) => Some(id.as_str()),
+            None => self
+                .output_devices
+                .iter()
+                .find(|d| d.is_default)
+                .map(|d| d.id.as_str()),
+        }
+    }
+
+    /// True when the returned microphone would be played into the very
+    /// speakers this machine is capturing.
+    ///
+    /// The loopback tap hears everything that endpoint plays, so the voice
+    /// coming back from the receiver would be captured and sent straight
+    /// back to it, which howls within a second. Both ends sound broken and
+    /// neither is: it is one cable plugged into itself.
+    fn mic_feeds_back(&self) -> bool {
+        if !self.mic_enabled {
+            return false;
+        }
+        let into = self.resolved_output(&self.mic_output_device);
+        let tapped = self.resolved_output(&self.capture_device);
+        into.is_some() && into == tapped
+    }
+
     fn mic_ui(&mut self, ui: &mut egui::Ui, is_sender: bool) {
         ui.add_space(12.0);
         let streaming = self.streaming();
@@ -959,6 +1109,21 @@ impl AudioPushApp {
                     });
             });
         });
+
+        if is_sender && self.mic_feeds_back() {
+            ui.add_space(4.0);
+            ui.colored_label(
+                egui::Color32::from_rgb(235, 110, 100),
+                "This plays the microphone into the speakers being captured.",
+            );
+            ui.label(
+                egui::RichText::new(
+                    "Everything that endpoint plays is picked up by the tap and sent                      back to the receiver, which howls within a second. Choose another                      output -- \"CABLE Input\" if you have VB-CABLE -- or capture a                      different device above.",
+                )
+                .color(egui::Color32::GRAY)
+                .small(),
+            );
+        }
 
         if is_sender {
             ui.label(
@@ -1055,10 +1220,12 @@ impl AudioPushApp {
     fn start_stop_ui(&mut self, ui: &mut egui::Ui, is_sender: bool) {
         ui.add_space(14.0);
         let streaming = self.streaming();
+        let paired = self
+            .target
+            .map(|t| self.settings.token_for(t.ip()).is_some())
+            .unwrap_or(false);
         let can_start = if is_sender {
-            self.target
-                .map(|t| self.settings.token_for(t.ip()).is_some())
-                .unwrap_or(false)
+            paired && !self.mic_feeds_back()
         } else {
             true
         };
@@ -1115,7 +1282,9 @@ impl AudioPushApp {
 
         if is_sender && !can_start {
             ui.label(
-                egui::RichText::new(if self.target.is_some() {
+                egui::RichText::new(if paired {
+                    "Point the microphone at another output first."
+                } else if self.target.is_some() {
                     "Pair with this receiver first."
                 } else {
                     "Pick a receiver above first."

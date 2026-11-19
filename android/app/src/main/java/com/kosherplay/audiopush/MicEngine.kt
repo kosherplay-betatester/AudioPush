@@ -4,6 +4,8 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.os.Process
 import android.util.Log
 import java.net.DatagramPacket
@@ -89,6 +91,32 @@ class MicEngine(private val context: Context, private val target: PeerTarget) {
             return
         }
 
+        // This phone is playing the PC's audio out of its own speaker while
+        // the microphone listens in the same room, so the microphone hears it
+        // and sends it back. VOICE_COMMUNICATION asks the platform for echo
+        // cancellation, but whether it arrives is up to the device; attaching
+        // the effects to the session is the part that can be checked.
+        // Neither is available on every phone, hence the guards.
+        val effects = mutableListOf<android.media.audiofx.AudioEffect>()
+        if (AcousticEchoCanceler.isAvailable()) {
+            runCatching {
+                AcousticEchoCanceler.create(record.audioSessionId)?.also {
+                    it.enabled = true
+                    effects.add(it)
+                }
+            }
+        } else {
+            Log.w("AudioPush", "no echo canceller on this device; expect feedback on speaker")
+        }
+        if (NoiseSuppressor.isAvailable()) {
+            runCatching {
+                NoiseSuppressor.create(record.audioSessionId)?.also {
+                    it.enabled = true
+                    effects.add(it)
+                }
+            }
+        }
+
         // Pre-allocated; the loop never asks the allocator for anything.
         val mono = ShortArray(Config.FRAMES_PER_BLOCK * 2)
         val block = ShortArray(Config.BLOCK_SAMPLES)
@@ -127,6 +155,7 @@ class MicEngine(private val context: Context, private val target: PeerTarget) {
             MicStats.errorText = "Microphone capture failed: ${e.message}"
         } finally {
             runCatching { record.stop() }
+            effects.forEach { effect -> runCatching { effect.release() } }
             runCatching { record.release() }
             Log.i(TAG, "microphone released")
         }

@@ -28,35 +28,8 @@ const BLOCK_DURATION: Duration =
 /// It has to be comfortably longer than the WASAPI engine period (~10 ms).
 const SILENCE_AFTER: Duration = Duration::from_millis(30);
 
-/// What the capture thread is listening to.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Source {
-    /// WASAPI loopback on a render endpoint: whatever Windows is playing.
-    SystemAudio,
-    /// A real capture endpoint: a microphone or line input.
-    Microphone,
-}
-
-impl Source {
-    /// Which kind of endpoint the device id refers to.
-    fn device_direction(&self) -> Direction {
-        match self {
-            Source::SystemAudio => Direction::Render,
-            Source::Microphone => Direction::Capture,
-        }
-    }
-
-    fn describe(&self) -> &'static str {
-        match self {
-            Source::SystemAudio => "output device to capture",
-            Source::Microphone => "microphone",
-        }
-    }
-}
-
 pub fn spawn(
     device_id: Option<String>,
-    source: Source,
     preset: Latency,
     ring: Arc<BlockRing>,
     shared: Arc<Shared>,
@@ -73,7 +46,7 @@ pub fn spawn(
             // Outer loop: reopen the device after any failure, which is also
             // how a default-device change or an unplugged endpoint recovers.
             while !stop.load(Ordering::Relaxed) {
-                match capture_once(device_id.as_deref(), source, preset, &ring, &shared, &stop) {
+                match capture_once(device_id.as_deref(), preset, &ring, &shared, &stop) {
                     Ok(()) => {}
                     Err(err) => {
                         shared.audio_running.store(false, Ordering::Relaxed);
@@ -95,7 +68,6 @@ pub fn spawn(
 
 fn capture_once(
     device_id: Option<&str>,
-    source: Source,
     preset: Latency,
     ring: &BlockRing,
     shared: &Shared,
@@ -105,13 +77,13 @@ fn capture_once(
     // Loopback reads from a *render* endpoint; a microphone is an ordinary
     // capture endpoint. The wasapi crate turns the first combination into
     // AUDCLNT_STREAMFLAGS_LOOPBACK on its own.
-    let device = devices::resolve(&enumerator, device_id, source.device_direction())
-        .map_err(|e| format!("no {}: {e}", source.describe()))?;
+    let device = devices::resolve(&enumerator, device_id, Direction::Render)
+        .map_err(|e| format!("no output device to capture: {e}"))?;
     let device_name = device.get_friendlyname().unwrap_or_default();
     let open_id = device.get_id().ok();
 
     let (client, event, blockalign) = open_client(&device, Direction::Capture, preset)
-        .map_err(|e| format!("could not open {}: {e}", source.describe()))?;
+        .map_err(|e| format!("could not open output device to capture: {e}"))?;
     let capture_client = client
         .get_audiocaptureclient()
         .map_err(|e| format!("could not get capture client: {e}"))?;
@@ -208,7 +180,7 @@ fn capture_once(
         // Cheap periodic check: did Windows switch the default output on us?
         if device_id.is_none() && device_check.elapsed() > Duration::from_secs(1) {
             device_check = Instant::now();
-            if let Ok(current) = enumerator.get_default_device(source.device_direction()) {
+            if let Ok(current) = enumerator.get_default_device(Direction::Render) {
                 if let Ok(current_id) = current.get_id() {
                     if open_id.as_deref() != Some(current_id.as_str()) {
                         // Reopen against the new default.
@@ -222,271 +194,4 @@ fn capture_once(
     let _ = client.stop_stream();
     shared.audio_running.store(false, Ordering::Relaxed);
     result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use wasapi::{DeviceEnumerator, SampleType, WaveFormat};
-
-    /// Lists the formats a cable's two halves will actually accept.
-    ///
-    /// Matching the sample rate of the two halves only helps if the channel
-    /// counts can be matched as well, and that is a property of the driver,
-    /// not a setting. This asks each endpoint directly, in exclusive mode,
-    /// which is what the Format dropdown in Windows offers.
-    #[test]
-    #[ignore]
-    fn what_formats_each_half_of_a_cable_accepts() {
-        wasapi::initialize_mta().ok();
-        let enumerator = DeviceEnumerator::new().unwrap();
-        for direction in [Direction::Render, Direction::Capture] {
-            let collection = enumerator.get_device_collection(direction).unwrap();
-            for i in 0..collection.get_nbr_devices().unwrap() {
-                let Ok(device) = collection.get_device_at_index(i) else {
-                    continue;
-                };
-                let name = device.get_friendlyname().unwrap_or_default();
-                if !name.contains("Steam Streaming Microphone") && !name.contains("CABLE") {
-                    continue;
-                }
-                let Ok(client) = device.get_iaudioclient() else {
-                    continue;
-                };
-                println!("
-{direction:?}  {name}");
-                for rate in [44100u32, 48000] {
-                    for channels in [1u16, 2] {
-                        for bits in [16u16, 32] {
-                            let format = WaveFormat::new(
-                                bits as usize,
-                                bits as usize,
-                                SampleType::Int,
-                                rate as usize,
-                                channels as usize,
-                                None,
-                            );
-                            let ok = client
-                                .is_supported(&format, wasapi::ShareMode::Exclusive)
-                                .is_ok();
-                            if ok {
-                                println!("    accepts {rate} Hz  {channels} ch  {bits} bit");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Prints the format of every endpoint, both directions.
-    ///
-    /// A virtual cable is two endpoints joined inside a driver. When the two
-    /// halves disagree about rate or channel count, and the driver copies
-    /// between them without converting, everything through it comes out at
-    /// the wrong speed -- so the two lines for one cable are what to compare.
-    #[test]
-    #[ignore]
-    fn print_every_endpoint_format() {
-        wasapi::initialize_mta().ok();
-        let enumerator = DeviceEnumerator::new().unwrap();
-        for direction in [Direction::Render, Direction::Capture] {
-            let collection = enumerator.get_device_collection(direction).unwrap();
-            for i in 0..collection.get_nbr_devices().unwrap() {
-                let Ok(device) = collection.get_device_at_index(i) else {
-                    continue;
-                };
-                let name = device.get_friendlyname().unwrap_or_default();
-                let Ok(client) = device.get_iaudioclient() else {
-                    continue;
-                };
-                let Ok(mix) = client.get_mixformat() else {
-                    continue;
-                };
-                println!(
-                    "{direction:?}  {:>6} Hz  {} ch  {:>2} bit   {name}",
-                    mix.get_samplespersec(),
-                    mix.get_nchannels(),
-                    mix.get_bitspersample(),
-                );
-            }
-        }
-    }
-
-    /// Measures whether a virtual audio cable changes the pitch of what
-    /// passes through it.
-    ///
-    /// Ignored by default: it needs a cable whose playback side and recording
-    /// side are two halves of one device, and it makes a noise. Run with
-    /// `cargo test --release -- --ignored --nocapture`.
-    ///
-    /// A tone goes in at a known frequency and is measured coming out. A
-    /// cable whose two halves run at different sample rates and does not
-    /// resample between them returns the tone at the wrong pitch, and
-    /// everything through it plays at the wrong speed.
-    #[test]
-    #[ignore]
-    fn a_virtual_cable_returns_the_pitch_it_was_given() {
-        const TONE_HZ: f64 = 1000.0;
-        wasapi::initialize_mta().ok();
-        let enumerator = DeviceEnumerator::new().unwrap();
-
-        let speaker = enumerator
-            .get_device_collection(Direction::Render)
-            .unwrap();
-        let mut sink = None;
-        for i in 0..speaker.get_nbr_devices().unwrap() {
-            let d = speaker.get_device_at_index(i).unwrap();
-            let name = d.get_friendlyname().unwrap_or_default();
-            if name.contains("Steam Streaming Microphone") || name.contains("CABLE Input") {
-                println!("playing into: {name}");
-                sink = Some(d);
-                break;
-            }
-        }
-        let Some(sink) = sink else {
-            println!("no virtual cable found; nothing to measure");
-            return;
-        };
-
-        let source = enumerator.get_default_device(Direction::Capture).unwrap();
-        println!("recording from: {}", source.get_friendlyname().unwrap_or_default());
-
-        let (out_client, out_event, _) =
-            crate::audio::open_client(&sink, Direction::Render, Latency::Stable).unwrap();
-        let render = out_client.get_audiorenderclient().unwrap();
-        let (in_client, in_event, in_align) =
-            crate::audio::open_client(&source, Direction::Capture, Latency::Stable).unwrap();
-        let capture = in_client.get_audiocaptureclient().unwrap();
-
-        // Both clients live on this thread: a WASAPI client is not Send, and
-        // the point is the measurement, not the structure.
-        out_client.start_stream().unwrap();
-        in_client.start_stream().unwrap();
-
-        let mut phase = 0.0f64;
-        let step = std::f64::consts::TAU * TONE_HZ / SAMPLE_RATE as f64;
-        let mut tone = vec![0u8; 4 * 4096];
-
-        let started = Instant::now();
-        let mut scratch = vec![0u8; 1 << 16];
-        let mut crossings = 0usize;
-        let mut samples = 0usize;
-        let mut previous = 0i16;
-
-        while started.elapsed() < Duration::from_secs(4) {
-            // Keep the tone flowing.
-            if let Ok(space) = out_client.get_available_space_in_frames() {
-                let frames = (space as usize).min(2048);
-                for chunk in tone.chunks_exact_mut(4).take(frames) {
-                    let v = ((phase.sin() * 12000.0) as i16).to_le_bytes();
-                    chunk[..2].copy_from_slice(&v);
-                    chunk[2..].copy_from_slice(&v);
-                    phase += step;
-                }
-                if frames > 0 {
-                    let _ = render.write_to_device(&tone[..frames * 4], None);
-                }
-            }
-
-            if in_event.wait_for_event(20).is_err() {
-                continue;
-            }
-            while let Ok(Some(frames)) = capture.get_next_packet_size() {
-                if frames == 0 {
-                    break;
-                }
-                let bytes = frames as usize * in_align;
-                if bytes > scratch.len() {
-                    scratch.resize(bytes, 0);
-                }
-                if capture.read_from_device(&mut scratch[..bytes]).is_err() {
-                    break;
-                }
-                // Let the tone reach the far side before counting.
-                if started.elapsed() < Duration::from_secs(1) {
-                    continue;
-                }
-                for frame in scratch[..bytes].chunks_exact(in_align) {
-                    let left = i16::from_le_bytes([frame[0], frame[1]]);
-                    if previous < 0 && left >= 0 {
-                        crossings += 1;
-                    }
-                    previous = left;
-                    samples += 1;
-                }
-            }
-        }
-        let _ = out_client.stop_stream();
-        let _ = in_client.stop_stream();
-
-        let seconds = samples as f64 / SAMPLE_RATE as f64;
-        let measured = crossings as f64 / seconds;
-        println!("sent {TONE_HZ} Hz, measured {measured:.0} Hz over {seconds:.1}s");
-        println!("speed through the cable: {:.3}x", measured / TONE_HZ);
-    }
-
-    /// Reports what the microphone path really delivers.
-    ///
-    /// Ignored by default because it needs a real microphone. Run it with
-    /// `cargo test --release -- --ignored --nocapture` on a machine that has
-    /// one. The number that matters is frames per second: the capture loop
-    /// assumes every stream is 48 kHz stereo, and anything else is played
-    /// back at the wrong speed.
-    #[test]
-    #[ignore]
-    fn the_microphone_really_arrives_as_48k_stereo() {
-        wasapi::initialize_mta().ok().unwrap();
-        let enumerator = DeviceEnumerator::new().unwrap();
-        let device = enumerator.get_default_device(Direction::Capture).unwrap();
-        println!("device: {}", device.get_friendlyname().unwrap_or_default());
-
-        let probe = device.get_iaudioclient().unwrap();
-        let mix = probe.get_mixformat().unwrap();
-        println!(
-            "endpoint mix format: {} Hz, {} ch, {} bits",
-            mix.get_samplespersec(),
-            mix.get_nchannels(),
-            mix.get_bitspersample()
-        );
-
-        let (client, event, blockalign) =
-            crate::audio::open_client(&device, Direction::Capture, Latency::Balanced).unwrap();
-        println!("we asked for blockalign {blockalign} bytes/frame");
-
-        let capture_client = client.get_audiocaptureclient().unwrap();
-        client.start_stream().unwrap();
-
-        let started = Instant::now();
-        let mut frames_seen = 0usize;
-        let mut scratch = vec![0u8; 1 << 16];
-        while started.elapsed() < Duration::from_secs(3) {
-            if event.wait_for_event(200).is_err() {
-                continue;
-            }
-            while let Ok(Some(frames)) = capture_client.get_next_packet_size() {
-                if frames == 0 {
-                    break;
-                }
-                let bytes = frames as usize * blockalign;
-                if bytes > scratch.len() {
-                    scratch.resize(bytes, 0);
-                }
-                if capture_client.read_from_device(&mut scratch[..bytes]).is_err() {
-                    break;
-                }
-                frames_seen += frames as usize;
-            }
-        }
-        let _ = client.stop_stream();
-
-        let per_second = frames_seen as f64 / started.elapsed().as_secs_f64();
-        println!("frames per second: {per_second:.0}  (expected {SAMPLE_RATE})");
-        let ratio = per_second / SAMPLE_RATE as f64;
-        println!("playback speed would be {ratio:.3}x");
-        assert!(
-            (0.95..1.05).contains(&ratio),
-            "the capture stream is not 48 kHz stereo: audio would play at {ratio:.3}x speed"
-        );
-    }
 }

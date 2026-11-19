@@ -57,12 +57,6 @@ pub struct Settings {
     /// WASAPI endpoint ids; `None` means "follow the Windows default".
     pub capture_device: Option<String>,
     pub playback_device: Option<String>,
-    /// Return microphone stream.
-    pub mic_enabled: bool,
-    /// Microphone endpoint to capture from, when receiving.
-    pub mic_input_device: Option<String>,
-    /// Output endpoint to play the incoming microphone into, when sending.
-    pub mic_output_device: Option<String>,
 }
 
 impl Settings {
@@ -119,9 +113,6 @@ impl Settings {
                 }
                 "capture_device" => settings.capture_device = Some(value.to_string()),
                 "playback_device" => settings.playback_device = Some(value.to_string()),
-                "mic_enabled" => settings.mic_enabled = value == "true",
-                "mic_input_device" => settings.mic_input_device = Some(value.to_string()),
-                "mic_output_device" => settings.mic_output_device = Some(value.to_string()),
                 "pair" => {
                     // "ip|name|token-hex"
                     let parts: Vec<&str> = value.splitn(3, '|').collect();
@@ -175,13 +166,6 @@ impl Settings {
         }
         if let Some(device) = &self.playback_device {
             text.push_str(&format!("playback_device={device}\n"));
-        }
-        text.push_str(&format!("mic_enabled={}\n", self.mic_enabled));
-        if let Some(device) = &self.mic_input_device {
-            text.push_str(&format!("mic_input_device={device}\n"));
-        }
-        if let Some(device) = &self.mic_output_device {
-            text.push_str(&format!("mic_output_device={device}\n"));
         }
         // Pairing secrets. This file is in the user's roaming profile, which
         // is as private as the rest of their settings; a token is worth no

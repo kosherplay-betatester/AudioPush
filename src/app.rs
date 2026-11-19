@@ -16,7 +16,7 @@ use wasapi::Direction;
 
 use crate::audio::devices::{self, DeviceInfo};
 use crate::config::{AUDIO_PORT, BLOCK_MS, Latency, PEER_TIMEOUT_MS, STREAM_TIMEOUT_MS};
-use crate::engine::{MicConfig, Session};
+use crate::engine::Session;
 use crate::net::discovery::{self, PairingQueue, PeerList};
 use crate::net::pair::{PairingHost, pair_with};
 use crate::net::scan::{self, ScanProgress};
@@ -75,12 +75,7 @@ pub struct AudioPushApp {
     local_ips: Vec<LocalAddress>,
 
     // Return microphone stream
-    mic_enabled: bool,
-    mic_input_device: Option<String>,
-    mic_output_device: Option<String>,
     /// Counters and level for the microphone stream, kept apart from the
-    /// main one so one stream failing cannot blank the other's readout.
-    mic_shared: Arc<Shared>,
 
     // Pairing
     /// Issues this machine's PIN while it is receiving.
@@ -146,10 +141,6 @@ impl AudioPushApp {
             target_label,
             playback_device: settings.playback_device.clone(),
             local_ips: local_addresses(),
-            mic_enabled: settings.mic_enabled,
-            mic_input_device: settings.mic_input_device.clone(),
-            mic_output_device: settings.mic_output_device.clone(),
-            mic_shared: Arc::new(Shared::new()),
             pairing_host: Arc::new(PairingHost::new()),
             pairing_queue: discovery::new_pairing_queue(),
             pin_input: String::new(),
@@ -237,18 +228,6 @@ impl AudioPushApp {
         }
         if self.settings.playback_device != self.playback_device {
             self.settings.playback_device = self.playback_device.clone();
-            dirty = true;
-        }
-        if self.settings.mic_enabled != self.mic_enabled {
-            self.settings.mic_enabled = self.mic_enabled;
-            dirty = true;
-        }
-        if self.settings.mic_input_device != self.mic_input_device {
-            self.settings.mic_input_device = self.mic_input_device.clone();
-            dirty = true;
-        }
-        if self.settings.mic_output_device != self.mic_output_device {
-            self.settings.mic_output_device = self.mic_output_device.clone();
             dirty = true;
         }
         if dirty {
@@ -646,7 +625,6 @@ impl AudioPushApp {
         }
 
         self.pairing_ui(ui);
-        self.mic_ui(ui, true);
         self.latency_ui(ui);
         self.start_stop_ui(ui, true);
         self.status_ui(ui, true);
@@ -729,7 +707,6 @@ impl AudioPushApp {
         });
 
         self.pin_ui(ui);
-        self.mic_ui(ui, false);
         self.latency_ui(ui);
         self.start_stop_ui(ui, false);
         self.status_ui(ui, false);
@@ -998,248 +975,6 @@ impl AudioPushApp {
         }
     }
 
-    /// The return microphone stream.
-    ///
-    /// On the receiver this is "lend my microphone to the workstation"; on
-    /// the sender it is "where do I play the microphone that arrives". They
-    /// are two halves of one switch, so they share a section.
-    /// The endpoint an output selection really means, resolving "follow
-    /// Windows" to whichever device that is right now.
-    fn resolved_output<'a>(&'a self, chosen: &'a Option<String>) -> Option<&'a str> {
-        match chosen {
-            Some(id) => Some(id.as_str()),
-            None => self
-                .output_devices
-                .iter()
-                .find(|d| d.is_default)
-                .map(|d| d.id.as_str()),
-        }
-    }
-
-    /// True when the returned microphone would be played into the very
-    /// speakers this machine is capturing.
-    ///
-    /// The loopback tap hears everything that endpoint plays, so the voice
-    /// coming back from the receiver would be captured and sent straight
-    /// back to it, which howls within a second. Both ends sound broken and
-    /// neither is: it is one cable plugged into itself.
-    fn mic_feeds_back(&self) -> bool {
-        if !self.mic_enabled {
-            return false;
-        }
-        let into = self.resolved_output(&self.mic_output_device);
-        let tapped = self.resolved_output(&self.capture_device);
-        into.is_some() && into == tapped
-    }
-
-    /// Checks the cable the microphone is being played into.
-    ///
-    /// A virtual cable is two endpoints joined inside a driver. The sound
-    /// written to one half comes out of the other, and some cables copy it
-    /// across without converting anything -- so when the two halves disagree
-    /// about sample rate or channel count, everything through them plays at
-    /// the wrong speed. Steam's Streaming Microphone is 48 kHz stereo on the
-    /// playback side and 44.1 kHz mono on the recording side, which is 0.46x:
-    /// slow enough that speech recognition hears nothing it understands.
-    ///
-    /// Nothing on this side can correct for it -- the mismatch is inside the
-    /// driver, past anything we can reach -- so the only useful thing to do
-    /// is say so before the user spends an evening on it. Returns the
-    /// sentence to show, and how far off the speed would be.
-    fn cable_mismatch(&self) -> Option<(String, f32)> {
-        let chosen = self.resolved_output(&self.mic_output_device)?;
-        let out = self.output_devices.iter().find(|d| d.id == chosen)?;
-        let hardware = out.hardware()?;
-        // The other half of the same cable, if this is one at all.
-        let input = self
-            .input_devices
-            .iter()
-            .find(|d| d.hardware() == Some(hardware))?;
-        if out.rate == 0 || input.rate == 0 || out.channels == 0 || input.channels == 0 {
-            return None;
-        }
-        let speed = (input.rate as f32 / out.rate as f32)
-            * (input.channels as f32 / out.channels as f32);
-        if (0.98..1.02).contains(&speed) {
-            return None;
-        }
-        Some((
-            format!(
-                "\"{hardware}\" plays at {} Hz / {} ch but records at {} Hz / {} ch.",
-                out.rate, out.channels, input.rate, input.channels
-            ),
-            speed,
-        ))
-    }
-
-    fn mic_ui(&mut self, ui: &mut egui::Ui, is_sender: bool) {
-        ui.add_space(12.0);
-        let streaming = self.streaming();
-
-        ui.add_enabled_ui(!streaming, |ui| {
-            let label = if is_sender {
-                "Use the receiver's microphone"
-            } else {
-                "Send this PC's microphone to the sender"
-            };
-            ui.checkbox(&mut self.mic_enabled, egui::RichText::new(label).strong());
-        });
-
-        if !self.mic_enabled {
-            ui.label(
-                egui::RichText::new(if is_sender {
-                    "Off: nothing listens on the microphone port."
-                } else {
-                    "Off: this PC's microphone is never opened."
-                })
-                .color(egui::Color32::GRAY)
-                .small(),
-            );
-            return;
-        }
-
-        // Device picker: an input endpoint on the receiver, an output
-        // endpoint on the sender (because that is where the voice is played).
-        let devices = if is_sender {
-            &self.output_devices
-        } else {
-            &self.input_devices
-        };
-        let selected_id = if is_sender {
-            &self.mic_output_device
-        } else {
-            &self.mic_input_device
-        };
-        let default_text = if is_sender {
-            "Default output (follow Windows)"
-        } else {
-            "Default microphone (follow Windows)"
-        };
-        let selected_name = selected_id
-            .as_ref()
-            .and_then(|id| devices.iter().find(|d| &d.id == id).map(|d| d.name.clone()))
-            .unwrap_or_else(|| default_text.to_string());
-
-        let options: Vec<(String, String)> = devices
-            .iter()
-            .map(|d| (d.id.clone(), d.name.clone()))
-            .collect();
-
-        ui.add_enabled_ui(!streaming, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(if is_sender { "Play it into" } else { "Microphone" });
-                egui::ComboBox::from_id_salt(if is_sender { "mic-out" } else { "mic-in" })
-                    .width(ui.available_width() - 8.0)
-                    .selected_text(selected_name)
-                    .show_ui(ui, |ui| {
-                        let slot = if is_sender {
-                            &mut self.mic_output_device
-                        } else {
-                            &mut self.mic_input_device
-                        };
-                        ui.selectable_value(slot, None, default_text);
-                        for (id, name) in &options {
-                            ui.selectable_value(slot, Some(id.clone()), name);
-                        }
-                    });
-            });
-        });
-
-        if is_sender {
-            if let Some((what, speed)) = self.cable_mismatch() {
-                ui.add_space(4.0);
-                ui.colored_label(
-                    egui::Color32::from_rgb(235, 110, 100),
-                    format!("This cable would play the voice at {speed:.2}x speed."),
-                );
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{what} It copies sound between its two halves without                          converting it, so what comes out is at the wrong speed and                          dictation will not understand a word. Nothing here can                          correct it. Use a cable whose halves agree -- VB-CABLE is                          the usual one."
-                    ))
-                    .color(egui::Color32::GRAY)
-                    .small(),
-                );
-            }
-        }
-
-        if is_sender && self.mic_feeds_back() {
-            ui.add_space(4.0);
-            ui.colored_label(
-                egui::Color32::from_rgb(235, 110, 100),
-                "This plays the microphone into the speakers being captured.",
-            );
-            ui.label(
-                egui::RichText::new(
-                    "Everything that endpoint plays is picked up by the tap and sent                      back to the receiver, which howls within a second. Choose another                      output -- \"CABLE Input\" if you have VB-CABLE -- or capture a                      different device above.",
-                )
-                .color(egui::Color32::GRAY)
-                .small(),
-            );
-        }
-
-        if is_sender {
-            ui.label(
-                egui::RichText::new(
-                    "Windows cannot expose a microphone from an ordinary app, so the voice \
-                     is played into an output device. To use it as a microphone elsewhere, \
-                     install VB-CABLE, play into \"CABLE Input\" here, and select \
-                     \"CABLE Output\" as the microphone in OBS, Discord or your recorder.",
-                )
-                .color(egui::Color32::GRAY)
-                .small(),
-            );
-        } else {
-            ui.label(
-                egui::RichText::new(
-                    "The microphone opens only while streaming, and only with this box \
-                     ticked. It is sent to whichever PC is streaming audio to this one.",
-                )
-                .color(egui::Color32::GRAY)
-                .small(),
-            );
-        }
-
-        if streaming {
-            ui.add_space(4.0);
-            if !is_sender {
-                // Where the microphone is actually going. Latched for the
-                // session on the first packet received, so it is worth
-                // showing: a microphone whose destination is invisible is a
-                // microphone you cannot trust.
-                let destination = Shared::get_string(&self.mic_shared.peer)
-                    .unwrap_or_else(|| "waiting for the sender...".to_string());
-                ui.label(
-                    egui::RichText::new(format!("Microphone going to {destination}"))
-                        .color(egui::Color32::from_rgb(120, 170, 235))
-                        .small(),
-                );
-            }
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Mic").small().color(egui::Color32::GRAY));
-                let level = self.mic_shared.level().clamp(0.0, 1.0).powf(0.5);
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), 10.0),
-                    egui::Sense::hover(),
-                );
-                let radius = egui::CornerRadius::same(3);
-                ui.painter()
-                    .rect_filled(rect, radius, egui::Color32::from_gray(32));
-                if level > 0.001 {
-                    let mut filled = rect;
-                    filled.set_width(rect.width() * level);
-                    ui.painter().rect_filled(
-                        filled,
-                        radius,
-                        egui::Color32::from_rgb(120, 170, 235),
-                    );
-                }
-            });
-            if let Some(error) = Shared::get_string(&self.mic_shared.audio_error) {
-                ui.colored_label(egui::Color32::from_rgb(235, 120, 100), error);
-            }
-        }
-    }
-
     fn latency_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(12.0);
         ui.label(egui::RichText::new("Latency").strong());
@@ -1277,7 +1012,7 @@ impl AudioPushApp {
             .map(|t| self.settings.token_for(t.ip()).is_some())
             .unwrap_or(false);
         let can_start = if is_sender {
-            paired && !self.mic_feeds_back()
+            paired
         } else {
             true
         };
@@ -1307,11 +1042,6 @@ impl AudioPushApp {
                         target,
                         token,
                         Arc::clone(&self.shared),
-                        MicConfig {
-                            enabled: self.mic_enabled,
-                            device_id: self.mic_output_device.clone(),
-                        },
-                        Arc::clone(&self.mic_shared),
                     ));
                 }
             } else {
@@ -1323,20 +1053,13 @@ impl AudioPushApp {
                     Arc::clone(&self.pairing_host),
                     Arc::clone(&self.pairing_queue),
                     Arc::clone(&self.shared),
-                    MicConfig {
-                        enabled: self.mic_enabled,
-                        device_id: self.mic_input_device.clone(),
-                    },
-                    Arc::clone(&self.mic_shared),
                 ));
             }
         }
 
         if is_sender && !can_start {
             ui.label(
-                egui::RichText::new(if paired {
-                    "Point the microphone at another output first."
-                } else if self.target.is_some() {
+                egui::RichText::new(if self.target.is_some() {
                     "Pair with this receiver first."
                 } else {
                     "Pick a receiver above first."

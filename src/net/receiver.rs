@@ -4,16 +4,15 @@
 //! Loss is detected from the sequence numbers and counted, never waited for.
 //! Malformed or foreign datagrams on the port are discarded silently.
 
-use std::net::{SocketAddr, UdpSocket};
+use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::config::{BLOCK_SAMPLES, MIC_PORT};
+use crate::config::BLOCK_SAMPLES;
 use crate::net::protocol::{PACKET_LEN, decode_audio, payload_into_block, verify_audio};
-use crate::net::sender::Target;
-use crate::pairing::{TokenSlot, TokenStore};
+use crate::pairing::TokenStore;
 use crate::ring::BlockRing;
 use crate::state::{Shared, now_ms};
 
@@ -28,13 +27,6 @@ pub fn spawn(
     ring: Arc<BlockRing>,
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
-    // Filled in with the senders address so the return microphone stream
-    // knows where to go. The receiver cannot know this in advance: it learns
-    // who is streaming to it only when the first packet arrives.
-    mic_target: Option<Target>,
-    // The key the return microphone stream should sign with: whichever
-    // pairing the accepted sender used.
-    mic_token: Option<TokenSlot>,
 ) -> JoinHandle<()> {
     thread::Builder::new()
         .name("audiopush-udp-recv".into())
@@ -113,30 +105,6 @@ pub fn spawn(
                 if current_peer.as_deref() != Some(peer_text.as_str()) {
                     shared.set_peer(Some(peer_text.clone()));
                     current_peer = Some(peer_text);
-                    // Point the return microphone stream at whoever started
-                    // streaming to us -- once, and only once.
-                    //
-                    // Following the peer here would be an eavesdropping hole:
-                    // anyone on the network could send a single packet to the
-                    // audio port and this machine would redirect its live
-                    // microphone to them, silently. The destination is latched
-                    // for the session instead, and shown in the UI, so a later
-                    // arrival cannot steal the microphone. Stopping and
-                    // starting the stream is what re-pairs it.
-                    if let Some(target) = &mic_target {
-                        if let Ok(mut slot) = target.lock() {
-                            if slot.is_none() {
-                                *slot = Some(SocketAddr::new(from.ip(), MIC_PORT));
-                                // Sign the microphone with the same
-                                // pairing this sender authenticated with.
-                                if let Some(key) = &mic_token {
-                                    if let Ok(mut key) = key.lock() {
-                                        *key = Some(token.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
 
                 payload_into_block(payload, &mut block);

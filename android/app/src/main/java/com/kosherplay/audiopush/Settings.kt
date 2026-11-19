@@ -68,10 +68,6 @@ class Settings(context: Context) {
         }
         set(value) = prefs.edit().putInt(KEY_PRESET, value.ordinal).apply()
 
-    /** Whether to lend this device's microphone while receiving. */
-    var micEnabled: Boolean
-        get() = prefs.getBoolean(KEY_MIC, false)
-        set(value) = prefs.edit().putBoolean(KEY_MIC, value).apply()
 
     /**
      * Paired machines, one per line as "host|name|token-hex". The same list
@@ -120,7 +116,6 @@ class Settings(context: Context) {
     private companion object {
         const val KEY_RECENT = "recent"
         const val KEY_PRESET = "preset"
-        const val KEY_MIC = "mic_enabled"
         const val KEY_PAIRINGS = "pairings"
     }
 }

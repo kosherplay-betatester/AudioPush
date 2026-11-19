@@ -17,8 +17,6 @@ object Config {
     const val AUDIO_PORT = 45778
     const val DISCOVERY_PORT = 45777
 
-    /** UDP port carrying the return microphone stream, receiver to sender. */
-    const val MIC_PORT = 45779
 
     /** Ring capacity in blocks; must be a power of two. 512 = 2.5 s. */
     const val RING_BLOCKS = 512

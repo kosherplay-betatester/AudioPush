@@ -26,10 +26,6 @@
     <string name="not_paired">This PC is not paired yet. Read the six-digit PIN from its screen.</string>
     <string name="pin_hint_field">123456</string>
     <string name="pair">Pair</string>
-    <string name="mic_switch">Lend my microphone to the PC</string>
-    <string name="mic_hint">Off by default. The microphone is opened only while streaming with this ticked, and is sent to whichever PC is streaming audio to this phone. On the PC, play it into VB-CABLE to use it as a microphone in other apps.</string>
-    <string name="mic_label">Mic</string>
-    <string name="mic_denied">Microphone permission was declined, so the microphone stays off.</string>
     <string name="latency">Latency</string>
     <string name="preset_low">Low</string>
     <string name="preset_balanced">Balanced</string>

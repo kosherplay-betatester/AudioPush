@@ -24,8 +24,6 @@ use crate::pairing::{TAG_LEN, Token};
 
 /// Magic for the main stream, sender to receiver.
 pub const MAGIC: [u8; 4] = *b"APU1";
-/// Magic for the return microphone stream, receiver to sender.
-pub const MIC_MAGIC: [u8; 4] = *b"APM1";
 
 pub const HEADER_LEN: usize = 16;
 /// Everything the tag covers: header plus payload.
@@ -333,7 +331,7 @@ mod tests {
         // A main-stream packet must not be accepted on the mic stream.
         let mut packet = [0u8; PACKET_LEN];
         encode_audio(&mut packet, MAGIC, &token, 0, 0, &[0i16; BLOCK_SAMPLES]);
-        assert!(decode_audio(&packet, MIC_MAGIC).is_none());
+        assert!(decode_audio(&packet, *b"XXXX").is_none());
 
         assert!(decode_discovery(b"nope").is_none());
         assert!(decode_discovery(&[b'A', b'P', b'D', b'1', 99]).is_none());

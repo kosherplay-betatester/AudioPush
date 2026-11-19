@@ -1,6 +1,6 @@
 [package]
 name = "audiopush"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 description = "Stream Windows system audio to another PC on the LAN with minimal latency"
 license = "MIT"

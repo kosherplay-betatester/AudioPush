@@ -68,10 +68,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pairBox: View
     private lateinit var pinInput: EditText
     private lateinit var pairButton: Button
-    private lateinit var micSwitch: CheckBox
-    private lateinit var micMeterRow: View
-    private lateinit var micLabel: TextView
-    private lateinit var micMeter: ProgressBar
     private lateinit var scanButton: Button
     private lateinit var clearButton: Button
     private lateinit var startButton: Button
@@ -117,20 +113,6 @@ class MainActivity : AppCompatActivity() {
 
     private val notificationLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
-
-    /**
-     * The microphone switch is only honoured once the permission is
-     * granted, and the box unticks itself if it is refused: a switch that
-     * looks on while nothing is captured would be worse than no switch.
-     */
-    private val micPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (!granted) {
-                micSwitch.isChecked = false
-                settings.micEnabled = false
-                StreamStats.errorText = getString(R.string.mic_denied)
-            }
-        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -205,10 +187,6 @@ class MainActivity : AppCompatActivity() {
         pairBox = findViewById(R.id.pairBox)
         pinInput = findViewById(R.id.pinInput)
         pairButton = findViewById(R.id.pairButton)
-        micSwitch = findViewById(R.id.micSwitch)
-        micMeterRow = findViewById(R.id.micMeterRow)
-        micLabel = findViewById(R.id.micLabel)
-        micMeter = findViewById(R.id.micMeter)
         scanButton = findViewById(R.id.scanButton)
         clearButton = findViewById(R.id.clearButton)
         startButton = findViewById(R.id.startButton)
@@ -235,16 +213,6 @@ class MainActivity : AppCompatActivity() {
             }
             presetHint.text = preset.hint
             settings.preset = preset
-        }
-        micSwitch.isChecked = settings.micEnabled
-        micSwitch.setOnCheckedChangeListener { _, checked ->
-            settings.micEnabled = checked
-            if (checked &&
-                ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-            }
         }
         newPinButton.setOnClickListener {
             val host = StreamService.sharedPairingHost
@@ -424,13 +392,9 @@ class MainActivity : AppCompatActivity() {
         }
         when (mode) {
             Mode.RECEIVE -> {
-                val micWanted = micSwitch.isChecked &&
-                    ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
-                    PackageManager.PERMISSION_GRANTED
                 val intent = Intent(this, StreamService::class.java)
                     .setAction(StreamService.ACTION_START_RECEIVER)
                     .putExtra(StreamService.EXTRA_PRESET, preset.ordinal)
-                    .putExtra(StreamService.EXTRA_MIC, micWanted)
                 ContextCompat.startForegroundService(this, intent)
             }
             Mode.SEND -> {
@@ -582,19 +546,6 @@ class MainActivity : AppCompatActivity() {
             val chosen = targetHost()
             val needsPairing = chosen != null && settings.tokenFor(chosen.first) == null
             pairBox.visibility = if (needsPairing && !running) View.VISIBLE else View.GONE
-        }
-
-        // The microphone meter only appears while it is actually capturing,
-        // so an idle switch never looks like a live microphone.
-        val micLive = MicStats.running.get() && mode == Mode.RECEIVE
-        micMeterRow.visibility = if (micLive) View.VISIBLE else View.GONE
-        micSwitch.isEnabled = !running
-        if (micLive) {
-            micMeter.progress =
-                (kotlin.math.sqrt(MicStats.level().coerceIn(0f, 1f)) * 100).toInt()
-            // Naming the destination is what stops a hijack being silent.
-            val destination = MicStats.targetText
-            micLabel.text = if (destination == null) "Mic (waiting)" else "Mic -> $destination"
         }
 
         // Where playback is actually going. Worth showing: "the meter moves

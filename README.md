@@ -273,43 +273,6 @@ Run the tests with `cargo test`.
 
 ---
 
-## Using the receiver's microphone
-
-The receiver can lend its microphone back to the sender, so a workstation
-with no microphone can use the laptop's or the phone's.
-
-- The switch lives on the **receiver**, because that is the machine whose
-  microphone opens. It is **off by default**, and the microphone is opened
-  only while streaming with the switch on, and released the moment you stop.
-- On the sender, choose where the voice is played under **Use the receiver's
-  microphone**.
-
-**Windows cannot expose a virtual microphone from an ordinary application** —
-that needs a signed kernel driver. So the voice arrives and is played into an
-output device of your choice. To use it as a microphone in other apps:
-
-1. Install [VB-CABLE](https://vb-audio.com/Cable/).
-2. In AudioPush, play the microphone into **CABLE Input**.
-3. In OBS, Discord or your recorder, select **CABLE Output** as the microphone.
-
-### What protects it
-
-The microphone destination is **latched for the session**: it is set once,
-from the first machine that streams audio to the receiver, and never
-reassigned. Without that latch, anyone on the network could send a single UDP
-packet to the audio port and silently redirect your live microphone to
-themselves.
-
-The receiver also **shows where the microphone is going** while it is on, so
-a redirection could not be invisible. Stopping and starting the stream is
-what re-pairs it.
-
-There is no authentication beyond this. AudioPush assumes a home or office
-network you trust: anyone already on it can send audio to your speakers, and
-could in principle win the race to be the first peer of a microphone session
-if they knew to try at the exact moment you pressed Start. If that matters
-for your network, leave the microphone switch off and use a USB microphone.
-
 ## "Windows protected your PC"
 
 Windows tags every file you download with its origin, and SmartScreen blocks

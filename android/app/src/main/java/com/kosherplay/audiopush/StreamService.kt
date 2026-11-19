@@ -26,7 +26,6 @@ class StreamService : Service() {
 
     private var receiver: ReceiverEngine? = null
     private var sender: SenderEngine? = null
-    private var mic: MicEngine? = null
     private lateinit var settings: Settings
 
     /**
@@ -70,18 +69,9 @@ class StreamService : Service() {
 
         locks = WifiLocks(this).also { it.acquire() }
 
-        // The return microphone stream is optional and off unless asked for.
-        // It only ever runs alongside the receiver, and only while it runs is
-        // the microphone open at all.
-        val wantsMic = intent.getBooleanExtra(EXTRA_MIC, false)
-        val micTarget = if (wantsMic) PeerTarget() else null
-
         // Only machines this device has paired with may stream to it.
         val tokens = TokenStore(settings.allTokens())
-        receiver = ReceiverEngine(this, preset, tokens, micTarget).also { it.start() }
-        if (micTarget != null) {
-            mic = MicEngine(this, micTarget).also { it.start() }
-        }
+        receiver = ReceiverEngine(this, preset, tokens).also { it.start() }
         // Announce so the PC finds this phone by name instead of by IP.
         announcer = Announcer(Config.AUDIO_PORT, pairingHost, tokens) { address, token ->
             // Persist the pairing so it survives a restart.
@@ -166,13 +156,11 @@ class StreamService : Service() {
 
     private fun stopEverything() {
         announcer?.stop()
-        mic?.stop()
         receiver?.stop()
         sender?.stop()
         locks?.release()
         runCatching { projection?.stop() }
         announcer = null
-        mic = null
         receiver = null
         sender = null
         locks = null
@@ -238,7 +226,6 @@ class StreamService : Service() {
         const val ACTION_START_SENDER = "com.kosherplay.audiopush.START_SENDER"
         const val ACTION_STOP = "com.kosherplay.audiopush.STOP"
         const val EXTRA_PRESET = "preset"
-        const val EXTRA_MIC = "mic"
         const val EXTRA_HOST = "host"
         const val EXTRA_PORT = "port"
         const val EXTRA_RESULT_CODE = "resultCode"

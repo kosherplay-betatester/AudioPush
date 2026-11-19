@@ -233,53 +233,6 @@
                 android:textSize="12sp"
                 android:visibility="gone" />
 
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:layout_marginTop="12dp"
-                android:background="@color/stroke" />
-
-            <CheckBox
-                android:id="@+id/micSwitch"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/mic_switch"
-                android:textColor="@color/text_primary"
-                android:textSize="15sp" />
-
-            <TextView
-                style="@style/Hint"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="@string/mic_hint" />
-
-            <LinearLayout
-                android:id="@+id/micMeterRow"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:visibility="gone">
-
-                <TextView
-                    android:id="@+id/micLabel"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginEnd="8dp"
-                    android:text="@string/mic_label"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="12sp" />
-
-                <ProgressBar
-                    android:id="@+id/micMeter"
-                    style="?android:attr/progressBarStyleHorizontal"
-                    android:layout_width="match_parent"
-                    android:layout_height="10dp"
-                    android:max="100"
-                    android:progressDrawable="@drawable/meter_mic" />
-            </LinearLayout>
         </LinearLayout>
 
         <!-- Send: pick the PC -->

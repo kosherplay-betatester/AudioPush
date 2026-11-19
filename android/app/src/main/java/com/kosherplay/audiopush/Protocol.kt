@@ -8,7 +8,7 @@ import java.nio.ByteOrder
  *
  * ```
  * offset  size  field
- *      0     4  magic   "APU1" main stream, "APM1" return microphone
+ *      0     4  magic   "APU1"
  *      4     4  seq     u32 LE, increments once per block, wraps
  *      8     4  ts      u32 LE, microseconds since the stream started
  *     12     4  key_id  u32 LE, which pairing token signed this
@@ -17,14 +17,12 @@ import java.nio.ByteOrder
  * ```
  *
  * The tag is what stops an unpaired machine on the network playing audio
- * through your speakers or redirecting your microphone to itself.
+ * through your speakers.
  */
 object Protocol {
     /** Magic for the main stream, sender to receiver. */
     val MAGIC = byteArrayOf('A'.code.toByte(), 'P'.code.toByte(), 'U'.code.toByte(), '1'.code.toByte())
 
-    /** Magic for the return microphone stream, receiver to sender. */
-    val MIC_MAGIC = byteArrayOf('A'.code.toByte(), 'P'.code.toByte(), 'M'.code.toByte(), '1'.code.toByte())
 
     const val HEADER_LEN = 16
 

@@ -30,8 +30,6 @@ class ReceiverEngine(
     private val preset: Latency,
     /** Every pairing this device will accept audio from. */
     private val tokens: TokenStore,
-    /** Filled in so the return microphone stream knows where to send. */
-    private val micTarget: PeerTarget? = null
 ) {
     private val stop = AtomicBoolean(false)
 
@@ -102,8 +100,7 @@ class ReceiverEngine(
 
                 // Authenticate before anything else looks at the packet.
                 // Without this an unpaired machine on the network could
-                // play audio through these speakers and, far worse,
-                // become the destination of this phone's microphone.
+                // play audio through these speakers.
                 val token = tokens.find(keyId)
                 if (token == null || !Protocol.verifyAudio(
                         packet.data, packet.length, token
@@ -130,24 +127,6 @@ class ReceiverEngine(
                 if (peer != peerText) {
                     peer = peerText
                     StreamStats.peerText = peerText
-                    // Point the return microphone stream at whoever started
-                    // streaming to us -- once, and only once.
-                    //
-                    // Following the peer here would be an eavesdropping hole:
-                    // anyone on the network could send a single packet to the
-                    // audio port and this phone would redirect its live
-                    // microphone to them, silently. The destination is latched
-                    // for the session instead, and shown in the UI, so a later
-                    // arrival cannot steal the microphone. Stopping and
-                    // starting the stream is what re-pairs it.
-                    micTarget?.let { target ->
-                        if (target.address == null) {
-                            target.address = packet.address
-                            // Sign the microphone with the same pairing
-                            // this sender authenticated with.
-                            target.token = token
-                        }
-                    }
                 }
 
                 Protocol.payloadIntoBlock(packet.data, block)

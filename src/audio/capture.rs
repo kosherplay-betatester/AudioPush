@@ -227,7 +227,57 @@ fn capture_once(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wasapi::DeviceEnumerator;
+    use wasapi::{DeviceEnumerator, SampleType, WaveFormat};
+
+    /// Lists the formats a cable's two halves will actually accept.
+    ///
+    /// Matching the sample rate of the two halves only helps if the channel
+    /// counts can be matched as well, and that is a property of the driver,
+    /// not a setting. This asks each endpoint directly, in exclusive mode,
+    /// which is what the Format dropdown in Windows offers.
+    #[test]
+    #[ignore]
+    fn what_formats_each_half_of_a_cable_accepts() {
+        wasapi::initialize_mta().ok();
+        let enumerator = DeviceEnumerator::new().unwrap();
+        for direction in [Direction::Render, Direction::Capture] {
+            let collection = enumerator.get_device_collection(direction).unwrap();
+            for i in 0..collection.get_nbr_devices().unwrap() {
+                let Ok(device) = collection.get_device_at_index(i) else {
+                    continue;
+                };
+                let name = device.get_friendlyname().unwrap_or_default();
+                if !name.contains("Steam Streaming Microphone") && !name.contains("CABLE") {
+                    continue;
+                }
+                let Ok(client) = device.get_iaudioclient() else {
+                    continue;
+                };
+                println!("
+{direction:?}  {name}");
+                for rate in [44100u32, 48000] {
+                    for channels in [1u16, 2] {
+                        for bits in [16u16, 32] {
+                            let format = WaveFormat::new(
+                                bits as usize,
+                                bits as usize,
+                                SampleType::Int,
+                                rate as usize,
+                                channels as usize,
+                                None,
+                            );
+                            let ok = client
+                                .is_supported(&format, wasapi::ShareMode::Exclusive)
+                                .is_ok();
+                            if ok {
+                                println!("    accepts {rate} Hz  {channels} ch  {bits} bit");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /// Prints the format of every endpoint, both directions.
     ///
